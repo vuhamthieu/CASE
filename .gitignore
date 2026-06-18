@@ -216,3 +216,34 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+instructions.md
+
+# Local audio captures and debug recordings
+*.wav
+*.WAV
+
+# Local speech/wakeword training outputs
+data/
+output/
+
+# Large local STT/TTS runtime artifacts
+ai/stt/vosk-model*/
+ai/tts/piper/
+ai/tts/*.onnx
+ai/tts/*.onnx.json
+ai/tts/*.tar.gz
+perception/audio/model/
+perception/audio/model_small_backup/
+perception/audio/vosk-model*.zip*
+piper/
+vosk-model*/
+vosk-model*.zip*
+en_US-*.onnx
+en_US-*.onnx.json
+
+# Wakeword archives/backups; keep active runtime models under models/wakewords/
+case_wakewords/
+models/wakewords/*_onnx/
+models/wakewords/*.zip
+models/wakewords/backup_old_v1/
