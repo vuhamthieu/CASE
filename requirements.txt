@@ -1,4 +1,9 @@
+google-genai
+numpy
 openwakeword
 onnxruntime
+pyserial
+python-dotenv
 scipy
 sounddevice
+vosk
