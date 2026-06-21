@@ -1,5 +1,6 @@
 google-genai
-numpy
+# Stable CPython 3.10 pair for Raspberry Pi arm64 and OpenCV's NumPy 1.x ABI.
+numpy==1.26.4
 openwakeword
 onnxruntime
 pyserial
@@ -7,3 +8,4 @@ python-dotenv
 scipy
 sounddevice
 vosk
+opencv-python-headless==4.11.0.86

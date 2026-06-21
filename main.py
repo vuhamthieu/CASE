@@ -1,20 +1,29 @@
 import asyncio
 import logging
+import time
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from middleware.message_bus import AsyncMessageBus
 from cognition.personality import CASEPersonality
 from actuation.serial_comms import SerialBridge
 from actuation.audio_output.tts_engine import CASEVoice
 from perception.audio.stt_engine import STTEngine
-from dotenv import load_dotenv
-
-load_dotenv()
+from src.vision.vision_engine import (
+    VISION_ENABLED,
+    VISION_GREETING_ENABLED,
+    VISION_GREETING_COOLDOWN_SEC,
+    VisionEngine,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 WAKEWORD_MODEL_PATH = PROJECT_ROOT / "models" / "wakewords" / "hey_case_v2.onnx"
 BOOT_GREETING_GUARD_SECONDS = 6.0
+VISION_GREETING_TEXT = "I see you, boss."
 
 
 # Filter system logs to gray color (\033[90m)
@@ -36,6 +45,46 @@ ch.setFormatter(ColoredFormatter())
 logger.addHandler(ch)
 
 
+class VisionGreetingGate:
+    """Allow a presence greeting only when conversation and TTS are idle."""
+
+    def __init__(self, bus, cooldown_sec=VISION_GREETING_COOLDOWN_SEC):
+        self.bus = bus
+        self.cooldown_sec = cooldown_sec
+        self.conversation_active = False
+        self.tts_active_count = 0
+        self.last_greeting_at = float("-inf")
+
+        bus.subscribe("USER_SPOKE", self._on_user_spoke)
+        bus.subscribe("TTS_START", self._on_tts_start)
+        bus.subscribe("TTS_END", self._on_tts_end)
+        bus.subscribe("VISION_USER_DETECTED", self._on_user_detected)
+
+    async def _on_user_spoke(self, payload):
+        self.conversation_active = True
+
+    async def _on_tts_start(self, payload):
+        self.tts_active_count += 1
+
+    async def _on_tts_end(self, payload):
+        self.tts_active_count = max(0, self.tts_active_count - 1)
+        if self.tts_active_count == 0:
+            self.conversation_active = False
+
+    async def _on_user_detected(self, payload):
+        now = time.monotonic()
+        if self.conversation_active or self.tts_active_count > 0:
+            logger.info("VISION: greeting skipped because CASE is busy")
+            return
+        if now - self.last_greeting_at < self.cooldown_sec:
+            logger.debug("VISION: greeting skipped due to cooldown")
+            return
+
+        self.last_greeting_at = now
+        await self.bus.publish("AI_SPEAK", VISION_GREETING_TEXT)
+        logger.info("VISION: queued idle user greeting")
+
+
 async def boot_sequence():
     logger.info("Initializing system components...")
 
@@ -48,6 +97,16 @@ async def boot_sequence():
         bus,
         wakeword_model_path=WAKEWORD_MODEL_PATH,
     )
+    vision = None
+    if VISION_ENABLED:
+        try:
+            vision = VisionEngine(bus)
+            if VISION_GREETING_ENABLED:
+                VisionGreetingGate(bus)
+        except Exception as exc:
+            logger.warning("Vision disabled: %s", exc)
+    else:
+        logger.info("VISION: disabled by VISION_ENABLED")
 
     banner = """
 ===================================================
@@ -77,10 +136,11 @@ async def boot_sequence():
         await asyncio.sleep(BOOT_GREETING_GUARD_SECONDS)
         await bus.publish("STT_ENABLE", "boot complete")
 
-        await asyncio.gather(
-            stt_task,
-            bridge_task,
-        )
+        background_tasks = [stt_task, bridge_task]
+        if vision is not None:
+            background_tasks.append(asyncio.create_task(vision.run()))
+
+        await asyncio.gather(*background_tasks)
 
     except asyncio.CancelledError:
         logger.info("Tasks cancelled, shutting down...")

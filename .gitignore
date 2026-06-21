@@ -238,6 +238,9 @@ perception/audio/model_small_backup/
 perception/audio/vosk-model*.zip*
 piper/
 vosk-model*/
+
+# Local Codex engineering context (not project documentation)
+context/
 vosk-model*.zip*
 en_US-*.onnx
 en_US-*.onnx.json
