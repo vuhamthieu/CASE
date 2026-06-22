@@ -1,4 +1,4 @@
-"""Low-rate V4L2 raw camera capture and face-presence detection for CASE."""
+"""Low-rate V4L2 raw camera capture and stable face tracking for CASE."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     import cv2
@@ -87,18 +87,63 @@ WB_RED_GAIN = MANUAL_WB_RED
 GRAY_WORLD_WB_STRENGTH = WB_STRENGTH
 
 VISION_ENABLED = _env_bool("VISION_ENABLED", True)
+VISION_RUNTIME_ENABLED = _env_bool("VISION_RUNTIME_ENABLED", True)
+VISION_RUN_ONLY_WHEN_IDLE = _env_bool("VISION_RUN_ONLY_WHEN_IDLE", True)
+VISION_PAUSE_DURING_LISTENING = _env_bool(
+    "VISION_PAUSE_DURING_LISTENING", True
+)
+VISION_PAUSE_DURING_THINKING = _env_bool("VISION_PAUSE_DURING_THINKING", True)
+VISION_PAUSE_DURING_SPEAKING = _env_bool("VISION_PAUSE_DURING_SPEAKING", True)
+VISION_IDLE_FPS = float(os.getenv("VISION_IDLE_FPS", "0.5"))
+VISION_ACTIVE_FPS = float(os.getenv("VISION_ACTIVE_FPS", "0.2"))
+VISION_TARGET_UPDATE_MIN_INTERVAL_SEC = float(
+    os.getenv("VISION_TARGET_UPDATE_MIN_INTERVAL_SEC", "2.0")
+)
+VISION_DIRECTION_EVENT_MIN_INTERVAL_SEC = float(
+    os.getenv("VISION_DIRECTION_EVENT_MIN_INTERVAL_SEC", "2.0")
+)
+VISION_LOG_MIN_INTERVAL_SEC = float(
+    os.getenv("VISION_LOG_MIN_INTERVAL_SEC", "5.0")
+)
+VISION_RUNTIME_SAVE_DEBUG_FRAMES = _env_bool(
+    "VISION_RUNTIME_SAVE_DEBUG_FRAMES", False
+)
+VISION_RUNTIME_PUBLISH_FRAME_READY = _env_bool(
+    "VISION_RUNTIME_PUBLISH_FRAME_READY", False
+)
+VISION_STARTUP_DELAY_SEC = float(os.getenv("VISION_STARTUP_DELAY_SEC", "2.0"))
 VISION_GREETING_ENABLED = _env_bool("VISION_GREETING_ENABLED", True)
 VISION_FPS = float(os.getenv("VISION_FPS", "1.0"))
 FACE_DETECTION_ENABLED = _env_bool("FACE_DETECTION_ENABLED", True)
-FACE_MIN_SIZE = (40, 40)
 FACE_SCALE_FACTOR = float(os.getenv("FACE_SCALE_FACTOR", "1.1"))
-FACE_MIN_NEIGHBORS = int(os.getenv("FACE_MIN_NEIGHBORS", "5"))
-USER_LOST_TIMEOUT_SEC = float(os.getenv("USER_LOST_TIMEOUT_SEC", "5.0"))
-USER_DETECTED_COOLDOWN_SEC = float(
-    os.getenv("USER_DETECTED_COOLDOWN_SEC", "15.0")
+FACE_MIN_NEIGHBORS = int(os.getenv("FACE_MIN_NEIGHBORS", "7"))
+FACE_MIN_SIZE = (
+    int(os.getenv("FACE_MIN_WIDTH", "80")),
+    int(os.getenv("FACE_MIN_HEIGHT", "80")),
 )
+FACE_MIN_AREA_RATIO = float(os.getenv("FACE_MIN_AREA_RATIO", "0.015"))
+FACE_MAX_AREA_RATIO = float(os.getenv("FACE_MAX_AREA_RATIO", "0.60"))
+FACE_ACCEPT_LARGEST_ONLY = _env_bool("FACE_ACCEPT_LARGEST_ONLY", True)
+FACE_STABLE_FRAMES_REQUIRED = int(
+    os.getenv("FACE_STABLE_FRAMES_REQUIRED", "2")
+)
+FACE_MISSING_FRAMES_ALLOWED = int(os.getenv("FACE_MISSING_FRAMES_ALLOWED", "2"))
+FACE_LEFT_THRESHOLD = float(os.getenv("FACE_LEFT_THRESHOLD", "0.40"))
+FACE_RIGHT_THRESHOLD = float(os.getenv("FACE_RIGHT_THRESHOLD", "0.60"))
+FACE_DIRECTION_EVENT_INTERVAL_SEC = float(
+    os.getenv("FACE_DIRECTION_EVENT_INTERVAL_SEC", "2.0")
+)
+USER_LOST_TIMEOUT_SEC = float(os.getenv("USER_LOST_TIMEOUT_SEC", "5.0"))
+VISION_USER_DETECTED_COOLDOWN_SEC = float(
+    os.getenv(
+        "VISION_USER_DETECTED_COOLDOWN_SEC",
+        os.getenv("USER_DETECTED_COOLDOWN_SEC", "15.0"),
+    )
+)
+# Backward-compatible name used by the Phase 1 engine.
+USER_DETECTED_COOLDOWN_SEC = VISION_USER_DETECTED_COOLDOWN_SEC
 VISION_GREETING_COOLDOWN_SEC = float(
-    os.getenv("VISION_GREETING_COOLDOWN_SEC", "60.0")
+    os.getenv("VISION_GREETING_COOLDOWN_SEC", "90.0")
 )
 
 CAMERA_VERTICAL_BLANKING = _env_optional_int("CAMERA_VERTICAL_BLANKING", 10000)
@@ -758,7 +803,7 @@ class V4L2RawCamera:
 
 
 class VisionEngine:
-    """Async, low-FPS face-presence engine that publishes message-bus events."""
+    """Async, low-FPS stable face tracker that publishes message-bus events."""
 
     def __init__(
         self,
@@ -769,12 +814,63 @@ class VisionEngine:
         face_min_size: tuple[int, int] = FACE_MIN_SIZE,
         face_scale_factor: float = FACE_SCALE_FACTOR,
         face_min_neighbors: int = FACE_MIN_NEIGHBORS,
+        face_min_area_ratio: float = FACE_MIN_AREA_RATIO,
+        face_max_area_ratio: float = FACE_MAX_AREA_RATIO,
+        face_accept_largest_only: bool = FACE_ACCEPT_LARGEST_ONLY,
+        face_stable_frames_required: int = FACE_STABLE_FRAMES_REQUIRED,
+        face_missing_frames_allowed: int = FACE_MISSING_FRAMES_ALLOWED,
+        face_left_threshold: float = FACE_LEFT_THRESHOLD,
+        face_right_threshold: float = FACE_RIGHT_THRESHOLD,
+        direction_event_interval_sec: float = (
+            VISION_DIRECTION_EVENT_MIN_INTERVAL_SEC
+        ),
         user_lost_timeout_sec: float = USER_LOST_TIMEOUT_SEC,
-        user_detected_cooldown_sec: float = USER_DETECTED_COOLDOWN_SEC,
+        user_detected_cooldown_sec: float = VISION_USER_DETECTED_COOLDOWN_SEC,
+        runtime_enabled: bool = VISION_RUNTIME_ENABLED,
+        run_only_when_idle: bool = VISION_RUN_ONLY_WHEN_IDLE,
+        pause_during_listening: bool = VISION_PAUSE_DURING_LISTENING,
+        pause_during_thinking: bool = VISION_PAUSE_DURING_THINKING,
+        pause_during_speaking: bool = VISION_PAUSE_DURING_SPEAKING,
+        idle_fps: float = VISION_IDLE_FPS,
+        active_fps: float = VISION_ACTIVE_FPS,
+        target_update_min_interval_sec: float = (
+            VISION_TARGET_UPDATE_MIN_INTERVAL_SEC
+        ),
+        log_min_interval_sec: float = VISION_LOG_MIN_INTERVAL_SEC,
+        case_state_provider: Optional[Callable[[], str]] = None,
+        publish_frame_ready: bool = True,
+        scheduler_controlled: bool = False,
     ) -> None:
         V4L2RawCamera._require_dependencies()
         if fps <= 0:
             raise ValueError("Vision FPS must be greater than zero")
+        if min(face_min_size) <= 0:
+            raise ValueError("Face minimum dimensions must be positive")
+        if face_scale_factor <= 1.0:
+            raise ValueError("Face scale factor must be greater than 1.0")
+        if face_min_neighbors < 0:
+            raise ValueError("Face minimum neighbors cannot be negative")
+        if not 0.0 <= face_min_area_ratio < face_max_area_ratio <= 1.0:
+            raise ValueError("Face area ratios must satisfy 0 <= min < max <= 1")
+        if face_stable_frames_required <= 0:
+            raise ValueError("Stable face frame count must be positive")
+        if face_missing_frames_allowed < 0:
+            raise ValueError("Allowed missing face frame count cannot be negative")
+        if not 0.0 <= face_left_threshold < face_right_threshold <= 1.0:
+            raise ValueError(
+                "Face direction thresholds must satisfy 0 <= left < right <= 1"
+            )
+        if min(
+            direction_event_interval_sec,
+            user_lost_timeout_sec,
+            user_detected_cooldown_sec,
+            target_update_min_interval_sec,
+            log_min_interval_sec,
+        ) < 0:
+            raise ValueError("Vision timing values cannot be negative")
+        if idle_fps <= 0 or active_fps <= 0:
+            raise ValueError("Vision runtime FPS values must be greater than zero")
+
         self.message_bus = message_bus
         self.camera = camera or V4L2RawCamera()
         self.fps = min(fps, 2.0)
@@ -784,95 +880,360 @@ class VisionEngine:
         self.face_min_size = face_min_size
         self.face_scale_factor = face_scale_factor
         self.face_min_neighbors = face_min_neighbors
+        self.face_min_area_ratio = face_min_area_ratio
+        self.face_max_area_ratio = face_max_area_ratio
+        self.face_accept_largest_only = face_accept_largest_only
+        self.face_stable_frames_required = face_stable_frames_required
+        self.face_missing_frames_allowed = face_missing_frames_allowed
+        self.face_left_threshold = face_left_threshold
+        self.face_right_threshold = face_right_threshold
+        self.direction_event_interval_sec = direction_event_interval_sec
         self.user_lost_timeout_sec = user_lost_timeout_sec
         self.user_detected_cooldown_sec = user_detected_cooldown_sec
+        self.runtime_enabled = runtime_enabled
+        self.run_only_when_idle = run_only_when_idle
+        self.pause_during_listening = pause_during_listening
+        self.pause_during_thinking = pause_during_thinking
+        self.pause_during_speaking = pause_during_speaking
+        self.idle_fps = idle_fps
+        self.active_fps = active_fps
+        self.target_update_min_interval_sec = target_update_min_interval_sec
+        self.log_min_interval_sec = log_min_interval_sec
+        self.case_state_provider = case_state_provider
+        self.publish_frame_ready = publish_frame_ready
+        self.scheduler_controlled = scheduler_controlled
         self.user_present = False
         self.last_face_seen_at: Optional[float] = None
         self.last_detected_event_at = float("-inf")
-        self._detection_event_pending = False
+        self.consecutive_face_frames = 0
+        self.missing_face_frames = 0
+        self.last_direction: Optional[str] = None
+        self.last_direction_event_at = float("-inf")
+        self.last_target_update_at = float("-inf")
+        self.last_target_direction: Optional[str] = None
+        self.last_target_stable: Optional[bool] = None
+        self.rejected_faces: list[dict[str, Any]] = []
+        self.haar_candidate_count = 0
         self._stop_event = asyncio.Event()
-        self._last_debug_log_at = float("-inf")
+        self._last_log_at: dict[str, float] = {}
         self._last_error_event_at = float("-inf")
+        self._paused_case_state: Optional[str] = None
+        self._capture_gate_enabled = not scheduler_controlled
+        self._scheduled_fps: Optional[float] = None
+        self._force_capture_override = False
+        self.camera_available: Optional[bool] = None
 
         self.face_cascade = None
         if self.face_detection_enabled:
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            cascade_path = (
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
             cascade = cv2.CascadeClassifier(cascade_path)
             if cascade.empty():
-                raise VisionUnavailableError(f"Could not load Haar cascade: {cascade_path}")
+                raise VisionUnavailableError(
+                    f"Could not load Haar cascade: {cascade_path}"
+                )
             self.face_cascade = cascade
 
     async def run(self) -> None:
+        if not self.runtime_enabled:
+            logger.info("VISION: disabled by VISION_RUNTIME_ENABLED")
+            await self._publish_status(
+                "disabled", reason="VISION_RUNTIME_ENABLED is false"
+            )
+            return
+
         await self._publish_status("starting")
         try:
             await asyncio.to_thread(self.camera.initialize)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self.camera_available = False
             logger.warning("VISION: disabled due to camera error: %s", exc)
             await self._publish_error(str(exc), force=True)
             await self._publish_status("disabled", reason=str(exc))
             return
 
+        self.camera_available = True
         await self._publish_status("running")
-        frame_interval = 1.0 / self.fps
         while not self._stop_event.is_set():
+            if not self._capture_gate_enabled:
+                await self._wait_or_stop(0.2)
+                continue
+            case_state = self._current_case_state()
+            if self._should_pause_for_state(case_state):
+                self._log_runtime_transition(case_state, paused=True)
+                await self._wait_or_stop(0.2)
+                continue
+            self._log_runtime_transition(case_state, paused=False)
+
             loop_started = time.monotonic()
             frame = await asyncio.to_thread(self.camera.capture_bgr_frame)
             if frame is None:
+                self.camera_available = False
                 reason = "camera capture failed"
                 logger.warning("VISION: disabled due to camera error")
                 await self._publish_error(reason, force=True)
                 await self._publish_status("disabled", reason=reason)
                 return
 
+            # CASE may enter listening/speaking while a V4L2 capture is already
+            # in flight. Discard that frame rather than publishing work into
+            # the voice-critical period.
+            case_state = self._current_case_state()
+            if self._should_pause_for_state(case_state):
+                self._log_runtime_transition(case_state, paused=True)
+                continue
+
             faces = self.detect_faces(frame)
-            payload = self.make_frame_payload(frame, faces)
-            payload["frame_bgr"] = frame
-            await self.message_bus.publish("VISION_FRAME_READY", payload)
+            payload = self.make_frame_payload(
+                frame,
+                faces,
+                rejected_faces=self.rejected_faces,
+                haar_candidate_count=self.haar_candidate_count,
+            )
+            if self.publish_frame_ready:
+                payload["frame_bgr"] = frame
+                await self.message_bus.publish("VISION_FRAME_READY", payload)
             await self._update_presence(faces, payload)
 
-            if time.monotonic() - self._last_debug_log_at >= 10.0:
+            if self._log_due("captured_frame"):
                 logger.info("VISION: captured frame faces=%s", len(faces))
-                self._last_debug_log_at = time.monotonic()
 
+            frame_interval = self._frame_interval_for_state(case_state)
             remaining = frame_interval - (time.monotonic() - loop_started)
             if remaining > 0:
-                try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    pass
+                await self._wait_or_stop(remaining)
 
     def stop(self) -> None:
         self._stop_event.set()
 
+    def set_scheduler_gate(
+        self,
+        enabled: bool,
+        fps: Optional[float] = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Enable or pause capture for an attention-scheduler burst."""
+        if fps is not None and fps <= 0:
+            raise ValueError("Scheduled vision FPS must be greater than zero")
+        self._scheduled_fps = fps if enabled else None
+        self._capture_gate_enabled = enabled
+        self._force_capture_override = enabled and force
+
+    def _current_case_state(self) -> Optional[str]:
+        if self.case_state_provider is None:
+            return None
+        try:
+            state = self.case_state_provider()
+        except Exception as exc:
+            if self._log_due("state_provider_error"):
+                logger.warning("VISION: could not read CASE state: %s", exc)
+            return "UNKNOWN"
+        return str(state or "UNKNOWN").upper()
+
+    def _should_pause_for_state(self, case_state: Optional[str]) -> bool:
+        if self._force_capture_override:
+            return False
+        if self.case_state_provider is None:
+            return False
+        state = case_state or "UNKNOWN"
+        idle_states = {"IDLE", "WAKEWORD_MODE"}
+        if self.run_only_when_idle:
+            return state not in idle_states
+
+        listening_states = {
+            "LISTENING",
+            "LISTEN_COMMAND",
+            "SHORT_FOLLOW_UP",
+            "LONG_CONVERSATION",
+            "POSSIBLE_END",
+            "FINAL_CONFIRM",
+            "FINAL_ACCEPTED",
+            "REOPENED_AFTER_FINAL",
+        }
+        if self.pause_during_listening and state in listening_states:
+            return True
+        if self.pause_during_thinking and state == "THINKING":
+            return True
+        if self.pause_during_speaking and state in {"SPEAKING", "WAKE_ACK"}:
+            return True
+        return False
+
+    def _frame_interval_for_state(self, case_state: Optional[str]) -> float:
+        if self._scheduled_fps is not None:
+            return 1.0 / self._scheduled_fps
+        if self.case_state_provider is None:
+            return 1.0 / self.fps
+        if case_state in {"IDLE", "WAKEWORD_MODE"}:
+            return 1.0 / self.idle_fps
+        return 1.0 / self.active_fps
+
+    def _log_runtime_transition(
+        self,
+        case_state: Optional[str],
+        *,
+        paused: bool,
+    ) -> None:
+        if self.case_state_provider is None:
+            return
+        state = case_state or "UNKNOWN"
+        if paused:
+            if self._paused_case_state != state:
+                state_label = (
+                    "LISTENING" if state == "LISTEN_COMMAND" else state
+                )
+                logger.info("VISION: paused because CASE is %s", state_label)
+                self._paused_case_state = state
+            return
+        if self._paused_case_state is not None:
+            logger.info("VISION: resumed because CASE is %s", state)
+            self._paused_case_state = None
+
+    async def _wait_or_stop(self, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    def _log_due(self, key: str) -> bool:
+        now = time.monotonic()
+        last_log_at = self._last_log_at.get(key, float("-inf"))
+        if now - last_log_at < self.log_min_interval_sec:
+            return False
+        self._last_log_at[key] = now
+        return True
+
     def detect_faces(self, frame_bgr: Any) -> list[dict[str, Any]]:
         if self.face_cascade is None:
+            self.rejected_faces = []
+            self.haar_candidate_count = 0
             return []
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
+        # Candidate filtering happens below, so keep Haar's own minimum small
+        # enough that rejected small boxes remain available for debug drawing.
+        haar_min_size = (
+            min(20, self.face_min_size[0]),
+            min(20, self.face_min_size[1]),
+        )
         detected = self.face_cascade.detectMultiScale(
             gray,
             scaleFactor=self.face_scale_factor,
             minNeighbors=self.face_min_neighbors,
-            minSize=self.face_min_size,
+            minSize=haar_min_size,
         )
-        return [
-            {
+        frame_height, frame_width = frame_bgr.shape[:2]
+        frame_area = float(frame_width * frame_height)
+        valid: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+
+        for x, y, width, height in detected:
+            candidate = {
                 "x": int(x),
                 "y": int(y),
                 "w": int(width),
                 "h": int(height),
                 "confidence": None,
+                "area_ratio": float(width * height / frame_area),
+                "accepted": False,
+                "rejection_reason": None,
             }
-            for x, y, width, height in detected
-        ]
+            self._add_face_geometry(candidate, frame_width, frame_height)
+            if width < self.face_min_size[0] or height < self.face_min_size[1]:
+                candidate["rejection_reason"] = "small"
+                rejected.append(candidate)
+            elif not (
+                self.face_min_area_ratio
+                <= candidate["area_ratio"]
+                <= self.face_max_area_ratio
+            ):
+                candidate["rejection_reason"] = "area"
+                rejected.append(candidate)
+            else:
+                valid.append(candidate)
+
+        if self.face_accept_largest_only and len(valid) > 1:
+            largest = max(valid, key=lambda face: face["w"] * face["h"])
+            for candidate in valid:
+                if candidate is largest:
+                    continue
+                candidate["rejection_reason"] = "non-largest"
+                rejected.append(candidate)
+            valid = [largest]
+
+        for candidate in valid:
+            candidate["accepted"] = True
+
+        self.haar_candidate_count = len(detected)
+        self.rejected_faces = rejected
+        if self._log_due("face_detection"):
+            logger.info(
+                "VISION: haar candidates=%s accepted=%s rejected=%s",
+                self.haar_candidate_count,
+                len(valid),
+                len(rejected),
+            )
+            for candidate in rejected:
+                logger.info(
+                    "VISION: rejected face reason=%s x=%s y=%s w=%s h=%s",
+                    candidate["rejection_reason"],
+                    candidate["x"],
+                    candidate["y"],
+                    candidate["w"],
+                    candidate["h"],
+                )
+            for candidate in valid:
+                logger.info(
+                    "VISION: accepted face direction=%s norm_x=%.2f "
+                    "area_ratio=%.3f",
+                    candidate["direction"],
+                    candidate["norm"]["x"],
+                    candidate["area_ratio"],
+                )
+        return valid
+
+    def _add_face_geometry(
+        self,
+        face: dict[str, Any],
+        frame_width: int,
+        frame_height: int,
+    ) -> None:
+        center_x_float = face["x"] + face["w"] / 2.0
+        center_y_float = face["y"] + face["h"] / 2.0
+        norm_x = center_x_float / frame_width
+        norm_y = center_y_float / frame_height
+        if norm_x < self.face_left_threshold:
+            direction = "LEFT"
+        elif norm_x > self.face_right_threshold:
+            direction = "RIGHT"
+        else:
+            direction = "CENTER"
+        face["center"] = {
+            "x": int(round(center_x_float)),
+            "y": int(round(center_y_float)),
+        }
+        face["norm"] = {"x": float(norm_x), "y": float(norm_y)}
+        face["direction"] = direction
 
     @staticmethod
-    def make_frame_payload(frame: Any, faces: list[dict[str, Any]]) -> dict[str, Any]:
+    def make_frame_payload(
+        frame: Any,
+        faces: list[dict[str, Any]],
+        rejected_faces: Optional[list[dict[str, Any]]] = None,
+        haar_candidate_count: Optional[int] = None,
+    ) -> dict[str, Any]:
         return {
             "source": "vision_engine",
             "faces": faces,
+            "rejected_faces": rejected_faces or [],
+            "haar_candidate_count": (
+                len(faces) + len(rejected_faces or [])
+                if haar_candidate_count is None
+                else haar_candidate_count
+            ),
             "frame_width": int(frame.shape[1]),
             "frame_height": int(frame.shape[0]),
             "timestamp": time.time(),
@@ -884,33 +1245,128 @@ class VisionEngine:
         frame_payload: dict[str, Any],
     ) -> None:
         now = time.monotonic()
-        event_payload = {key: value for key, value in frame_payload.items() if key != "frame_bgr"}
+        event_payload = {
+            key: value for key, value in frame_payload.items() if key != "frame_bgr"
+        }
         if faces:
             self.last_face_seen_at = now
-            if not self.user_present:
-                self.user_present = True
-                self._detection_event_pending = True
+            self.missing_face_frames = 0
+            self.consecutive_face_frames += 1
+            if self._log_due("stable_face"):
+                logger.info(
+                    "VISION: stable face frames=%s/%s",
+                    min(
+                        self.consecutive_face_frames,
+                        self.face_stable_frames_required,
+                    ),
+                    self.face_stable_frames_required,
+                )
+
             if (
-                self._detection_event_pending
-                and now - self.last_detected_event_at
-                >= self.user_detected_cooldown_sec
+                not self.user_present
+                and self.consecutive_face_frames >= self.face_stable_frames_required
             ):
-                await self.message_bus.publish("VISION_USER_DETECTED", event_payload)
-                self.last_detected_event_at = now
-                self._detection_event_pending = False
-                logger.info("VISION: face detected count=%s", len(faces))
-                logger.info("VISION: published VISION_USER_DETECTED")
+                self.user_present = True
+                if (
+                    now - self.last_detected_event_at
+                    >= self.user_detected_cooldown_sec
+                ):
+                    await self.message_bus.publish(
+                        "VISION_USER_DETECTED", event_payload
+                    )
+                    self.last_detected_event_at = now
+                    logger.info("VISION: published VISION_USER_DETECTED")
+                else:
+                    logger.info(
+                        "VISION: VISION_USER_DETECTED suppressed by cooldown"
+                    )
+
+            if self.user_present:
+                await self._publish_target_update(faces[0], frame_payload, now)
             return
 
+        self.consecutive_face_frames = 0
+        self.missing_face_frames += 1
         if (
             self.user_present
             and self.last_face_seen_at is not None
+            and self.missing_face_frames > self.face_missing_frames_allowed
             and now - self.last_face_seen_at >= self.user_lost_timeout_sec
         ):
             self.user_present = False
-            self._detection_event_pending = False
+            seconds_missing = now - self.last_face_seen_at
+            lost_payload = {
+                **event_payload,
+                "target": "face",
+                "seconds_since_seen": seconds_missing,
+            }
             await self.message_bus.publish("VISION_USER_LOST", event_payload)
-            logger.info("VISION: user lost")
+            logger.info("VISION: published VISION_USER_LOST")
+            await self.message_bus.publish("VISION_TARGET_LOST", lost_payload)
+            logger.info("VISION: published VISION_TARGET_LOST")
+            self.last_face_seen_at = None
+            self.last_direction = None
+            self.last_direction_event_at = float("-inf")
+            self.last_target_update_at = float("-inf")
+            self.last_target_direction = None
+            self.last_target_stable = None
+            self.missing_face_frames = 0
+
+    async def _publish_target_update(
+        self,
+        face: dict[str, Any],
+        frame_payload: dict[str, Any],
+        now: float,
+    ) -> None:
+        direction = face["direction"]
+        stable = (
+            self.user_present
+            and self.consecutive_face_frames >= self.face_stable_frames_required
+        )
+        target_payload = {
+            "source": "vision_engine",
+            "target": "face",
+            "direction": direction,
+            "stable": stable,
+            "bbox": {
+                "x": face["x"],
+                "y": face["y"],
+                "w": face["w"],
+                "h": face["h"],
+            },
+            "center": dict(face["center"]),
+            "norm": dict(face["norm"]),
+            "area_ratio": face["area_ratio"],
+            "frame_width": frame_payload["frame_width"],
+            "frame_height": frame_payload["frame_height"],
+            "timestamp": frame_payload["timestamp"],
+        }
+        if stable and (
+            direction != self.last_direction
+            or now - self.last_direction_event_at
+            >= self.direction_event_interval_sec
+        ):
+            event_name = f"VISION_FACE_{direction}"
+            await self.message_bus.publish(event_name, target_payload)
+            logger.info("VISION: published %s", event_name)
+            self.last_direction = direction
+            self.last_direction_event_at = now
+
+        target_changed = (
+            direction != self.last_target_direction
+            or stable != self.last_target_stable
+        )
+        if (
+            target_changed
+            or now - self.last_target_update_at
+            >= self.target_update_min_interval_sec
+        ):
+            await self.message_bus.publish("VISION_TARGET_UPDATE", target_payload)
+            self.last_target_update_at = now
+            self.last_target_direction = direction
+            self.last_target_stable = stable
+            if self._log_due("target_update"):
+                logger.info("VISION: published VISION_TARGET_UPDATE")
 
     async def capture_scene_snapshot(
         self,

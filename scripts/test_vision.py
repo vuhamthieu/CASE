@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless V4L2/OpenCV smoke test for CASE's Optic Nerve."""
+"""Headless V4L2/OpenCV tracking test for CASE's Optic Nerve."""
 
 from __future__ import annotations
 
@@ -29,6 +29,10 @@ from src.vision.vision_engine import (  # noqa: E402
     CAMERA_VERTICAL_BLANKING,
     ENABLE_GRAY_WORLD_WB,
     ENABLE_MANUAL_WB,
+    FACE_MIN_NEIGHBORS,
+    FACE_MIN_SIZE,
+    FACE_SCALE_FACTOR,
+    FACE_STABLE_FRAMES_REQUIRED,
     GAMMA,
     MANUAL_WB_BLUE,
     MANUAL_WB_GREEN,
@@ -39,10 +43,15 @@ from src.vision.vision_engine import (  # noqa: E402
     VISION_PROCESS_WIDTH,
     VISION_SNAPSHOT_DIR,
     VISION_TEMP_RAW_PATH,
+    USER_LOST_TIMEOUT_SEC,
     V4L2RawCamera,
     VisionEngine,
     VisionUnavailableError,
     cv2,
+)
+from src.vision.vision_scheduler import (  # noqa: E402
+    VisionMode,
+    VisionScheduler,
 )
 
 
@@ -175,6 +184,46 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save every processed frame with face boxes; no GUI is used.",
     )
+    parser.add_argument(
+        "--face-min-neighbors",
+        type=int,
+        default=FACE_MIN_NEIGHBORS,
+        help="Haar minimum-neighbor threshold; raise it to reduce false positives.",
+    )
+    parser.add_argument(
+        "--face-scale-factor",
+        type=float,
+        default=FACE_SCALE_FACTOR,
+        help="Haar image-pyramid scale factor (must be greater than 1.0).",
+    )
+    parser.add_argument(
+        "--face-min-size",
+        type=int,
+        default=FACE_MIN_SIZE[0],
+        help="Minimum accepted square face size in processed-frame pixels.",
+    )
+    parser.add_argument(
+        "--face-stable-frames",
+        type=int,
+        default=FACE_STABLE_FRAMES_REQUIRED,
+        help="Consecutive accepted frames required before detection events.",
+    )
+    parser.add_argument(
+        "--lost-timeout",
+        type=float,
+        default=USER_LOST_TIMEOUT_SEC,
+        help="Seconds without an accepted face before publishing lost events.",
+    )
+    parser.add_argument(
+        "--show-events",
+        action="store_true",
+        help="Print face-presence, direction, and target tracking events.",
+    )
+    parser.add_argument(
+        "--scheduler-demo",
+        action="store_true",
+        help="Simulate attention bursts and CASE state pauses without a camera.",
+    )
     return parser.parse_args()
 
 
@@ -292,19 +341,24 @@ async def run_bayer_code_test(camera: V4L2RawCamera) -> int:
 
 async def run_detection(camera: V4L2RawCamera, args: argparse.Namespace) -> int:
     bus = AsyncMessageBus()
-    engine = VisionEngine(bus, camera=camera, fps=args.fps)
+    engine = VisionEngine(
+        bus,
+        camera=camera,
+        fps=args.fps,
+        face_min_neighbors=args.face_min_neighbors,
+        face_scale_factor=args.face_scale_factor,
+        face_min_size=(args.face_min_size, args.face_min_size),
+        face_stable_frames_required=args.face_stable_frames,
+        user_lost_timeout_sec=args.lost_timeout,
+    )
     debug_dir = PROJECT_ROOT / "output" / "vision_debug"
     failure_seen = False
 
-    async def print_event(name: str, payload: dict) -> None:
-        faces = len(payload.get("faces", []))
-        print(f"{name}: faces={faces} timestamp={payload.get('timestamp')}", flush=True)
+    def event_printer(name: str):
+        async def print_event(payload: dict) -> None:
+            print(f"{name}: {payload}", flush=True)
 
-    async def on_detected(payload: dict) -> None:
-        await print_event("VISION_USER_DETECTED", payload)
-
-    async def on_lost(payload: dict) -> None:
-        await print_event("VISION_USER_LOST", payload)
+        return print_event
 
     async def on_status(payload: dict) -> None:
         nonlocal failure_seen
@@ -328,13 +382,48 @@ async def run_detection(camera: V4L2RawCamera, args: argparse.Namespace) -> int:
         for face in payload.get("faces", []):
             x, y, width, height = (face[key] for key in ("x", "y", "w", "h"))
             cv2.rectangle(annotated, (x, y), (x + width, y + height), (0, 255, 0), 2)
+            label = f"accepted {face['direction']}"
+            cv2.putText(
+                annotated,
+                label,
+                (x, max(15, y - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+        for face in payload.get("rejected_faces", []):
+            x, y, width, height = (face[key] for key in ("x", "y", "w", "h"))
+            reason = face.get("rejection_reason", "area")
+            color = (0, 255, 255) if reason == "non-largest" else (0, 0, 255)
+            cv2.rectangle(annotated, (x, y), (x + width, y + height), color, 2)
+            cv2.putText(
+                annotated,
+                f"rejected {reason}",
+                (x, max(15, y - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
         filename = datetime.now().strftime("frame_%Y%m%d_%H%M%S_%f.jpg")
         path = debug_dir / filename
         if cv2.imwrite(str(path), annotated):
             print(f"VISION_FRAME_READY: saved {path}", flush=True)
 
-    bus.subscribe("VISION_USER_DETECTED", on_detected)
-    bus.subscribe("VISION_USER_LOST", on_lost)
+    if args.show_events:
+        for event_name in (
+            "VISION_USER_DETECTED",
+            "VISION_USER_LOST",
+            "VISION_FACE_LEFT",
+            "VISION_FACE_CENTER",
+            "VISION_FACE_RIGHT",
+            "VISION_TARGET_UPDATE",
+            "VISION_TARGET_LOST",
+        ):
+            bus.subscribe(event_name, event_printer(event_name))
     bus.subscribe("VISION_STATUS", on_status)
     bus.subscribe("VISION_ERROR", on_error)
     bus.subscribe("VISION_FRAME_READY", save_debug_frame)
@@ -344,7 +433,100 @@ async def run_detection(camera: V4L2RawCamera, args: argparse.Namespace) -> int:
     return 1 if failure_seen else 0
 
 
+async def run_scheduler_demo(args: argparse.Namespace) -> int:
+    """Exercise scheduler policy quickly without touching camera hardware."""
+
+    class DemoVisionEngine:
+        def __init__(self) -> None:
+            self.gate_enabled = False
+            self.fps = None
+
+        def set_scheduler_gate(self, enabled: bool, fps=None) -> None:
+            changed = (enabled, fps) != (self.gate_enabled, self.fps)
+            self.gate_enabled = enabled
+            self.fps = fps if enabled else None
+            if changed:
+                print(
+                    f"VISION_DEMO: capture_gate={enabled} fps={self.fps}",
+                    flush=True,
+                )
+
+    async def wait_for_mode(
+        scheduler: VisionScheduler,
+        mode: str,
+        timeout: float = 2.0,
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while scheduler.mode != mode:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(f"scheduler demo timed out waiting for {mode}")
+            await asyncio.sleep(0.02)
+
+    bus = AsyncMessageBus()
+    state = {"value": "IDLE"}
+    demo_engine = DemoVisionEngine()
+    scheduler = VisionScheduler(
+        bus,
+        demo_engine,
+        case_state_provider=lambda: state["value"],
+        idle_glance_interval_sec=100.0,
+        idle_glance_duration_sec=0.4,
+        boredom_scan_duration_sec=0.4,
+        social_tracking_duration_sec=0.4,
+        user_requested_duration_sec=0.4,
+        poll_interval_sec=0.05,
+        initial_idle_glance_due=True,
+    )
+
+    if args.show_events:
+        async def show_requested(payload: dict) -> None:
+            print(f"VISION_USER_REQUESTED: {payload}", flush=True)
+
+        bus.subscribe("VISION_USER_REQUESTED", show_requested)
+
+    task = asyncio.create_task(scheduler.run())
+    try:
+        await wait_for_mode(scheduler, VisionMode.IDLE_GLANCE)
+        await bus.publish(
+            "VISION_USER_DETECTED",
+            {"source": "scheduler_demo", "stable": True},
+        )
+        await bus.publish(
+            "VISION_TARGET_UPDATE",
+            {"direction": "CENTER", "stable": True},
+        )
+        await wait_for_mode(scheduler, VisionMode.SOCIAL_TRACKING)
+        await wait_for_mode(scheduler, VisionMode.OFF)
+
+        scheduler.boredom_score = 61.2
+        await wait_for_mode(scheduler, VisionMode.BOREDOM_SCAN)
+        await wait_for_mode(scheduler, VisionMode.OFF)
+
+        state["value"] = "LISTEN_COMMAND"
+        await bus.publish(
+            "VISION_USER_REQUESTED",
+            {
+                "source": "scheduler_demo",
+                "transcript": "Can you see me?",
+            },
+        )
+        await asyncio.sleep(0.15)
+        state["value"] = "IDLE"
+        await wait_for_mode(scheduler, VisionMode.USER_REQUESTED)
+        state["value"] = "SPEAKING"
+        await asyncio.sleep(0.15)
+        state["value"] = "IDLE"
+        await wait_for_mode(scheduler, VisionMode.OFF)
+        print("VISION_SCHEDULER_DEMO: completed", flush=True)
+        return 0
+    finally:
+        scheduler.stop()
+        await task
+
+
 async def async_main(args: argparse.Namespace) -> int:
+    if args.scheduler_demo:
+        return await run_scheduler_demo(args)
     camera = build_camera(args)
     if args.test_bayer_codes:
         return await run_bayer_code_test(camera)
