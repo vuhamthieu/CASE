@@ -205,7 +205,7 @@ class DialogueJsonExtractor:
 
 
 class CASEPersonality:
-    def __init__(self, message_bus):
+    def __init__(self, message_bus, input_topic: str = "USER_SPOKE"):
         if genai is None or types is None:
             raise RuntimeError(
                 "google-genai is not installed. Activate the CASE venv and run: "
@@ -238,7 +238,7 @@ class CASEPersonality:
             config=types.GenerateContentConfig(system_instruction=system_instruction),
         )
 
-        self.message_bus.subscribe("USER_SPOKE", self.handle_user_input)
+        self.message_bus.subscribe(input_topic, self.handle_user_input)
         self.message_bus.subscribe("TTS_END", self._on_tts_end)
 
     async def _on_tts_end(self, payload) -> None:
