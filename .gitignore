@@ -149,6 +149,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -226,6 +228,9 @@ instructions.md
 # Local speech/wakeword training outputs
 data/
 output/
+logs/
+output/realtime_debug/
+output/vision_snapshots/
 
 # Large local STT/TTS runtime artifacts
 ai/stt/vosk-model*/

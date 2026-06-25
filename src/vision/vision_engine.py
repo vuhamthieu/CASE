@@ -10,9 +10,12 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from src.config import defaults
 
 try:
     import cv2
@@ -86,8 +89,29 @@ WB_GREEN_GAIN = MANUAL_WB_GREEN
 WB_RED_GAIN = MANUAL_WB_RED
 GRAY_WORLD_WB_STRENGTH = WB_STRENGTH
 
-VISION_ENABLED = _env_bool("VISION_ENABLED", True)
-VISION_RUNTIME_ENABLED = _env_bool("VISION_RUNTIME_ENABLED", True)
+VISION_MODE = os.getenv("VISION_MODE", defaults.VISION_MODE).strip().lower()
+VISION_ON_DEMAND_ONLY = _env_bool(
+    "VISION_ON_DEMAND_ONLY", defaults.VISION_ON_DEMAND_ONLY
+)
+VISION_OPEN_CAMERA_ON_BOOT = _env_bool(
+    "VISION_OPEN_CAMERA_ON_BOOT", defaults.VISION_OPEN_CAMERA_ON_BOOT
+)
+VISION_BACKGROUND_TASK_ENABLED = _env_bool(
+    "VISION_BACKGROUND_TASK_ENABLED", defaults.VISION_BACKGROUND_TASK_ENABLED
+)
+VISION_IDLE_GLANCE_ENABLED = _env_bool(
+    "VISION_IDLE_GLANCE_ENABLED", defaults.VISION_IDLE_GLANCE_ENABLED
+)
+VISION_SOCIAL_TRACKING_ENABLED = _env_bool(
+    "VISION_SOCIAL_TRACKING_ENABLED", defaults.VISION_SOCIAL_TRACKING_ENABLED
+)
+VISION_AUTO_FACE_TRACKING_ENABLED = _env_bool(
+    "VISION_AUTO_FACE_TRACKING_ENABLED", defaults.VISION_AUTO_FACE_TRACKING_ENABLED
+)
+VISION_ENABLED = _env_bool("VISION_ENABLED", defaults.VISION_ENABLED)
+VISION_RUNTIME_ENABLED = _env_bool(
+    "VISION_RUNTIME_ENABLED", defaults.VISION_RUNTIME_ENABLED
+)
 VISION_RUN_ONLY_WHEN_IDLE = _env_bool("VISION_RUN_ONLY_WHEN_IDLE", True)
 VISION_PAUSE_DURING_LISTENING = _env_bool(
     "VISION_PAUSE_DURING_LISTENING", True
@@ -112,7 +136,23 @@ VISION_RUNTIME_PUBLISH_FRAME_READY = _env_bool(
     "VISION_RUNTIME_PUBLISH_FRAME_READY", False
 )
 VISION_STARTUP_DELAY_SEC = float(os.getenv("VISION_STARTUP_DELAY_SEC", "2.0"))
-VISION_GREETING_ENABLED = _env_bool("VISION_GREETING_ENABLED", True)
+VISION_IDLE_GREETING_ENABLED = _env_bool(
+    "VISION_IDLE_GREETING_ENABLED", defaults.VISION_IDLE_GREETING_ENABLED
+)
+VISION_IDLE_USER_GREETING_ENABLED = _env_bool(
+    "VISION_IDLE_USER_GREETING_ENABLED",
+    defaults.VISION_IDLE_USER_GREETING_ENABLED,
+)
+VISION_GREETING_ENABLED = _env_bool(
+    "VISION_GREETING_ENABLED",
+    VISION_IDLE_GREETING_ENABLED and VISION_IDLE_USER_GREETING_ENABLED,
+)
+VISION_IDLE_GREETING_COOLDOWN_AFTER_CONVERSATION_SEC = float(
+    os.getenv(
+        "VISION_IDLE_GREETING_COOLDOWN_AFTER_CONVERSATION_SEC",
+        str(defaults.VISION_IDLE_GREETING_COOLDOWN_AFTER_CONVERSATION_SEC),
+    )
+)
 VISION_FPS = float(os.getenv("VISION_FPS", "1.0"))
 FACE_DETECTION_ENABLED = _env_bool("FACE_DETECTION_ENABLED", True)
 FACE_SCALE_FACTOR = float(os.getenv("FACE_SCALE_FACTOR", "1.1"))
@@ -153,10 +193,30 @@ CAMERA_DIGITAL_GAIN = _env_optional_int("CAMERA_DIGITAL_GAIN", 512)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VISION_SNAPSHOT_DIR = PROJECT_ROOT / "output" / "vision_snapshots"
+VISION_BLOCKED_CASE_STATES = {
+    "WAKE_ACK",
+    "LISTEN_COMMAND",
+    "LISTENING",
+    "THINKING",
+    "SPEAKING",
+    "SHORT_FOLLOW_UP",
+    "ECHO_GUARD",
+}
 
 
 class VisionUnavailableError(RuntimeError):
     """Raised when a required local camera dependency is unavailable."""
+
+
+@dataclass(frozen=True)
+class VisionResult:
+    ok: bool
+    reason: str
+    mode: str
+    status: str
+    faces: list[dict[str, Any]]
+    path: Optional[Path] = None
+    error: Optional[str] = None
 
 
 class V4L2RawCamera:
@@ -1413,3 +1473,107 @@ class VisionEngine:
             {"source": "vision_engine", "error": message, "timestamp": time.time()},
         )
         await asyncio.sleep(0)
+
+
+class _NullBus:
+    async def publish(self, topic: str, payload: Any = None) -> None:
+        return None
+
+
+async def run_vision_once(
+    reason: str,
+    mode: str = "single_frame",
+    *,
+    output_dir: str | Path = VISION_SNAPSHOT_DIR,
+    message_bus: Optional[Any] = None,
+    case_state_provider: Optional[Callable[[], str]] = None,
+    allow_during_thinking: bool = False,
+) -> VisionResult:
+    """Open the V4L2 camera for one explicit request, then return to hard-off."""
+    normalized_mode = (mode or "single_frame").strip().lower()
+    if case_state_provider is not None:
+        try:
+            state = str(case_state_provider() or "UNKNOWN").upper()
+        except Exception as exc:
+            logger.warning("VISION: state check failed before open: %s", exc)
+            state = "UNKNOWN"
+        blocked_states = set(VISION_BLOCKED_CASE_STATES)
+        if allow_during_thinking:
+            blocked_states.discard("THINKING")
+        if state in blocked_states:
+            logger.info("VISION: request blocked because CASE is %s", state)
+            logger.info("VISION: hard off, device closed")
+            return VisionResult(
+                ok=False,
+                reason=reason,
+                mode=normalized_mode,
+                status="BLOCKED",
+                faces=[],
+                error=f"CASE state blocks vision: {state}",
+            )
+    logger.info("VISION: opening on-demand for reason=%s", reason)
+    camera = V4L2RawCamera()
+    bus = message_bus or _NullBus()
+    try:
+        await asyncio.to_thread(camera.initialize)
+        engine = VisionEngine(
+            bus,
+            camera=camera,
+            case_state_provider=case_state_provider,
+            runtime_enabled=True,
+            run_only_when_idle=False,
+            scheduler_controlled=True,
+            publish_frame_ready=False,
+        )
+        frame = await asyncio.to_thread(camera.capture_bgr_frame)
+        if frame is None:
+            logger.warning("VISION: capture failed reason=%s", reason)
+            return VisionResult(
+                ok=False,
+                reason=reason,
+                mode=normalized_mode,
+                status="ERROR",
+                faces=[],
+                error="camera capture failed",
+            )
+
+        faces = engine.detect_faces(frame)
+        path = None
+        if normalized_mode in {"snapshot", "picture", "take_picture"}:
+            destination = Path(output_dir)
+            destination.mkdir(parents=True, exist_ok=True)
+            path = destination / datetime.now().strftime(
+                "snapshot_%Y%m%d_%H%M%S.jpg"
+            )
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("VISION: could not write snapshot path=%s", path)
+                return VisionResult(
+                    ok=False,
+                    reason=reason,
+                    mode=normalized_mode,
+                    status="ERROR",
+                    faces=faces,
+                    error=f"could not write snapshot: {path}",
+                )
+        logger.info("VISION: captured frame")
+        return VisionResult(
+            ok=True,
+            reason=reason,
+            mode=normalized_mode,
+            status="OK" if faces else "NOFACE",
+            faces=faces,
+            path=path,
+        )
+    except Exception as exc:
+        logger.warning("VISION: on-demand capture failed: %s", exc)
+        return VisionResult(
+            ok=False,
+            reason=reason,
+            mode=normalized_mode,
+            status="ERROR",
+            faces=[],
+            error=str(exc),
+        )
+    finally:
+        logger.info("VISION: closing camera")
+        logger.info("VISION: hard off, device closed")

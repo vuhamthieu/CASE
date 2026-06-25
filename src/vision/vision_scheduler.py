@@ -8,6 +8,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
+from src.config import defaults
 from .vision_engine import VisionEngine
 
 
@@ -21,14 +22,27 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-VISION_SCHEDULER_ENABLED = _env_bool("VISION_SCHEDULER_ENABLED", True)
-VISION_STARTUP_ENABLED = _env_bool("VISION_STARTUP_ENABLED", True)
+VISION_SCHEDULER_ENABLED = _env_bool(
+    "VISION_SCHEDULER_ENABLED", defaults.VISION_SCHEDULER_ENABLED
+)
+VISION_STARTUP_ENABLED = _env_bool(
+    "VISION_STARTUP_ENABLED", defaults.VISION_STARTUP_ENABLED
+)
+VISION_ON_DEMAND_ONLY = _env_bool(
+    "VISION_ON_DEMAND_ONLY", defaults.VISION_ON_DEMAND_ONLY
+)
+VISION_IDLE_GLANCE_ENABLED = _env_bool(
+    "VISION_IDLE_GLANCE_ENABLED", defaults.VISION_IDLE_GLANCE_ENABLED
+)
+VISION_SOCIAL_TRACKING_ENABLED = _env_bool(
+    "VISION_SOCIAL_TRACKING_ENABLED", defaults.VISION_SOCIAL_TRACKING_ENABLED
+)
 VISION_PAUSE_DURING_LISTENING = _env_bool(
     "VISION_PAUSE_DURING_LISTENING", True
 )
 VISION_PAUSE_DURING_THINKING = _env_bool("VISION_PAUSE_DURING_THINKING", True)
 VISION_PAUSE_DURING_SPEAKING = _env_bool("VISION_PAUSE_DURING_SPEAKING", True)
-VISION_ALLOW_WHEN_IDLE = _env_bool("VISION_ALLOW_WHEN_IDLE", True)
+VISION_ALLOW_WHEN_IDLE = _env_bool("VISION_ALLOW_WHEN_IDLE", False)
 
 VISION_IDLE_GLANCE_INTERVAL_SEC = float(
     os.getenv("VISION_IDLE_GLANCE_INTERVAL_SEC", "45.0")
@@ -56,7 +70,7 @@ VISION_MOVE_PRECHECK_DURATION_SEC = float(
 )
 VISION_MOVE_PRECHECK_FPS = float(os.getenv("VISION_MOVE_PRECHECK_FPS", "1.0"))
 
-BOREDOM_ENABLED = _env_bool("BOREDOM_ENABLED", True)
+BOREDOM_ENABLED = _env_bool("BOREDOM_ENABLED", False)
 BOREDOM_SCORE_MIN = float(os.getenv("BOREDOM_SCORE_MIN", "0.0"))
 BOREDOM_SCORE_MAX = float(os.getenv("BOREDOM_SCORE_MAX", "100.0"))
 BOREDOM_TRIGGER_THRESHOLD = float(os.getenv("BOREDOM_TRIGGER_THRESHOLD", "60.0"))
@@ -172,6 +186,9 @@ class VisionScheduler:
     async def run(self) -> None:
         self.vision_engine.set_scheduler_gate(False)
         self._log_camera_off()
+        if VISION_ON_DEMAND_ONLY:
+            logger.info("VISION_SCHEDULER: disabled because VISION_ON_DEMAND_ONLY=true")
+            return
         if not self.enabled or not self.startup_enabled:
             logger.info("VISION_SCHEDULER: disabled by configuration")
             return
@@ -401,6 +418,9 @@ class VisionScheduler:
             return
         if self._pending_social_tracking:
             self._pending_social_tracking = False
+            if not VISION_SOCIAL_TRACKING_ENABLED:
+                logger.info("VISION_SCHEDULER: social tracking disabled")
+                return
             self._start_burst(
                 VisionMode.SOCIAL_TRACKING,
                 self.social_tracking_duration_sec,
@@ -419,7 +439,10 @@ class VisionScheduler:
                 self.boredom_scan_fps,
             )
             return
-        if now - self._last_idle_glance_at >= self.idle_glance_interval_sec:
+        if (
+            VISION_IDLE_GLANCE_ENABLED
+            and now - self._last_idle_glance_at >= self.idle_glance_interval_sec
+        ):
             self._start_burst(
                 VisionMode.IDLE_GLANCE,
                 self.idle_glance_duration_sec,

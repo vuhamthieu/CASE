@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from src.vision.vision_engine import run_vision_once
+
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ _TAKE_PICTURE_PATTERNS = (
 _SEE_ME_PATTERNS = (
     re.compile(r"\bcan you (?:actually )?see me\b"),
     re.compile(r"\bdo you see me\b"),
+    re.compile(r"\blook at me\b"),
+    re.compile(r"\blook around\b"),
+    re.compile(r"\buse (?:the )?(?:camera|vision)\b"),
+    re.compile(r"\b(?:camera|vision) check\b"),
     re.compile(r"\bam i centered\b"),
     re.compile(r"\bam i in (?:the )?center\b"),
     re.compile(r"\bwhere am i\b"),
@@ -53,12 +59,14 @@ class IntentRouter:
         *,
         vision_scheduler: Optional[Any] = None,
         vision_engine: Optional[Any] = None,
+        vision_once: Optional[Any] = None,
         input_topic: str = "USER_SPOKE",
         chat_topic: str = "CHAT_USER_SPOKE",
     ) -> None:
         self.message_bus = message_bus
         self.vision_scheduler = vision_scheduler
         self.vision_engine = vision_engine
+        self.vision_once = vision_once or run_vision_once
         self.chat_topic = chat_topic
         self._local_command_lock = asyncio.Lock()
         message_bus.subscribe(input_topic, self.handle_transcript)
@@ -96,53 +104,42 @@ class IntentRouter:
                 await self._handle_take_picture()
 
     async def _handle_see_me(self) -> None:
-        if self.vision_scheduler is None:
-            await self._local_reply(
-                "My camera isn't giving me a clean frame right now."
-            )
-            return
-        try:
-            result = await self.vision_scheduler.run_user_requested_burst(
-                duration_sec=4.0,
-                fps=1.0,
-                wait_for_stable=True,
-                timeout_sec=5.0,
-            )
-        except Exception as exc:
-            logger.warning("INTENT_ROUTER: forced vision burst failed: %s", exc)
-            result = {"status": "ERROR"}
-
-        status = result.get("status")
-        target = result.get("target") or {}
-        direction = target.get("direction")
+        capture = await self.vision_once(
+            IntentType.VISION_SEE_ME,
+            mode="single_frame",
+            message_bus=self.message_bus,
+            allow_during_thinking=True,
+        )
+        status = "STABLE" if capture.ok and capture.faces else capture.status
+        face = capture.faces[0] if capture.faces else {}
+        direction = face.get("direction")
         replies = {
-            "CENTER": "Yes, boss. You're centered.",
+            "CENTER": "Yeah. You're centered.",
             "LEFT": "I see you on my left.",
             "RIGHT": "I see you on my right.",
         }
         if status == "STABLE" and direction in replies:
             reply = replies[direction]
         elif status == "ERROR":
-            reply = "My camera isn't giving me a clean frame right now."
+            reply = "I tried, but the camera did not give me a clean frame."
         else:
             reply = "I don't have a clean visual lock on you."
         await self._local_reply(reply)
 
     async def _handle_take_picture(self) -> None:
-        if self.vision_engine is None:
-            await self._local_reply("I tried, but the camera capture failed.")
-            return
-        try:
-            path = await self.vision_engine.capture_scene_snapshot()
-        except Exception as exc:
-            logger.warning("INTENT_ROUTER: requested snapshot failed: %s", exc)
-            path = None
+        result = await self.vision_once(
+            IntentType.VISION_TAKE_PICTURE,
+            mode="snapshot",
+            message_bus=self.message_bus,
+            allow_during_thinking=True,
+        )
+        path = result.path if result.ok else None
 
         if path is None:
             reply = "I tried, but the camera capture failed."
         else:
             logger.info("VISION: saved requested snapshot path=%s", path)
-            reply = "Done, boss. I saved the snapshot."
+            reply = "Done. I saved the snapshot."
         await self._local_reply(reply)
 
     async def _local_reply(self, text: str) -> None:

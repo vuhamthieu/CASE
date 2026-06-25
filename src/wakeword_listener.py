@@ -11,6 +11,8 @@ from typing import Callable, Iterable, TypedDict
 
 import numpy as np
 
+from src.audio.input_device import configured_input_device
+
 
 SAMPLE_RATE = 16_000
 FRAME_DURATION_SECONDS = 0.08
@@ -44,6 +46,7 @@ class WakeWordListener:
         save_debug_seconds: float = 5.0,
         frame_scores: bool = False,
         record_false_positive_dir: str | Path | None = None,
+        input_device: int | str | None = None,
     ) -> None:
         self.model_paths = [Path(path).expanduser().resolve() for path in model_paths]
         self.threshold = threshold
@@ -59,6 +62,9 @@ class WakeWordListener:
         )
         self.save_debug_seconds = save_debug_seconds
         self.frame_scores = frame_scores
+        self.input_device = (
+            configured_input_device() if input_device is None else input_device
+        )
         self.record_false_positive_dir = (
             Path(record_false_positive_dir).expanduser()
             if record_false_positive_dir
@@ -151,7 +157,13 @@ class WakeWordListener:
 
         audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=4)
         status_queue: queue.Queue[str] = queue.Queue(maxsize=1)
-        device_info = sd.query_devices(kind="input")
+        try:
+            device_info = sd.query_devices(self.input_device, "input")
+        except Exception as exc:
+            raise RuntimeError(
+                "Configured microphone is unavailable: "
+                f"{self.input_device!r}: {exc}"
+            ) from exc
         device_sample_rate = int(round(device_info["default_samplerate"]))
         input_channels = max(1, min(2, int(device_info["max_input_channels"])))
         native_chunk_samples = max(
@@ -212,6 +224,7 @@ class WakeWordListener:
 
         try:
             with sd.RawInputStream(
+                device=self.input_device,
                 samplerate=device_sample_rate,
                 blocksize=0,
                 channels=input_channels,
@@ -485,16 +498,54 @@ class WakeWordListener:
             stats["window_best_score"] = 0.0
             stats["window_best_name"] = "unknown"
 
-        if confirmed_model and self._cooldown_elapsed():
+        cooldown_ready = self._cooldown_elapsed()
+        if confirmed_model and cooldown_ready:
             confirmed_name, confirmed_score, _ = confirmed_model
             stats["confirmed_wakes"] += 1.0
             self._last_trigger_time = time.monotonic()
+            accepted_confirmation = confirmations.get(confirmed_name, {})
+            print(
+                "WAKE_CONFIRM_ACCEPT: "
+                f"key={confirmed_name} "
+                f"hit_count={int(accepted_confirmation.get('hit_count', 0))} "
+                f"window_max={float(accepted_confirmation.get('window_max', 0.0)):.6f} "
+                "reason=hit_window_and_strong_window_max",
+                flush=True,
+            )
             print(
                 f"Wake word detected: {confirmed_name} score={confirmed_score:.3f}",
                 flush=True,
             )
             self._start_false_positive_clip(confirmed_name, confirmed_score)
             on_wakeword(confirmed_name, confirmed_score)
+        elif top_confirmation["hit_count"] >= self.min_hits:
+            current_score_strong_ok = score >= self.strong_threshold
+            window_max_strong_ok = (
+                top_confirmation["window_max"] >= self.strong_threshold
+            )
+            reasons = []
+            if score < self.threshold:
+                reasons.append("current_score_below_threshold")
+            if not window_max_strong_ok:
+                reasons.append("window_max_below_strong_threshold")
+            if not cooldown_ready:
+                reasons.append("cooldown_active")
+            print(
+                "WAKE_CONFIRM_REJECT:\n"
+                f"  current_score_raw={score:.6f}\n"
+                f"  window_max_raw={top_confirmation['window_max']:.6f}\n"
+                f"  threshold={self.threshold:.6f}\n"
+                f"  strong_threshold={self.strong_threshold:.6f}\n"
+                f"  hit_count={int(top_confirmation['hit_count'])}\n"
+                f"  min_hits={self.min_hits}\n"
+                f"  hit_window_sec={self.hit_window_sec:.3f}\n"
+                f"  cooldown_active={not cooldown_ready}\n"
+                "  state_gate_ok=True\n"
+                f"  current_score_strong_ok={current_score_strong_ok}\n"
+                f"  window_max_strong_ok={window_max_strong_ok}\n"
+                f"  reason={','.join(reasons) or 'unknown'}",
+                flush=True,
+            )
 
         if self.frame_scores:
             print(

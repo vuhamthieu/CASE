@@ -3,9 +3,12 @@ google-genai
 numpy==1.26.4
 openwakeword
 onnxruntime
+piper-tts
 pyserial
 python-dotenv
 scipy
+sherpa-onnx
 sounddevice
+transformers
 vosk
 opencv-python-headless==4.11.0.86

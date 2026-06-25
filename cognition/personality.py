@@ -7,6 +7,53 @@ import time
 from itertools import count
 from typing import Iterator, Optional
 
+from src.config import defaults
+from src.config.env import get_str
+from src.realtime.realtime_config import (
+    CASE_REALTIME_ALLOW_LONG_ANSWER_WHEN_ASKED,
+    CASE_REALTIME_DETAIL_MAX_CHARS,
+    CASE_REALTIME_DETAIL_MAX_CHUNKS,
+    CASE_REALTIME_MAX_CHARS_ROAST,
+    CASE_REALTIME_MAX_LLM_WAIT_SEC,
+    CASE_REALTIME_MAX_SENTENCES,
+    CASE_REALTIME_REQUIRE_COMPLETE_SENTENCE,
+    CASE_REALTIME_TARGET_SENTENCES,
+    CASE_RESPONSE_MAX_TOTAL_CHARS,
+    CASE_REALTIME_TTS_TEXT_DEADLINE_SEC,
+    CASE_RESPONSE_MODE,
+    CASE_STREAM_FULL_RESPONSE,
+    CASE_TTS_ALLOW_MULTI_CHUNK,
+    CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+    CASE_TTS_CHUNK_MAX_CHARS,
+    CASE_TTS_CHUNK_MIN_CHARS,
+    CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
+    CASE_TTS_MERGE_TINY_CHUNKS,
+    CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+    CASE_TTS_TINY_CHUNK_MAX_CHARS,
+    CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
+    CASE_TTS_ENABLE_THINKING_FALLBACK,
+    CASE_TTS_FALLBACK_SHORT_REPLY,
+    CASE_TTS_FALLBACK_ONLY_ON_ERROR,
+    CASE_TTS_MAX_WAIT_FOR_SENTENCE_SEC,
+    CASE_TTS_MIN_SAFE_CHARS,
+    CASE_TTS_REQUIRE_SAFE_BOUNDARY,
+    CASE_TTS_MAX_CHUNKS_PER_TURN,
+    CASE_TTS_REALTIME_MAX_CHUNKS,
+    CASE_TTS_REALTIME_MAX_CHARS,
+    CASE_TTS_REALTIME_TRUNCATE_EXTRA,
+    CASE_TTS_REALTIME_WAIT_FOR_SENTENCE_END,
+    CASE_HONESTY_PERCENT,
+    CASE_HUMOR_PERCENT,
+    CASE_SARCASM_LEVEL,
+    CASE_STYLE_SHORT_REPLIES,
+    CASE_VOICE_PRESET,
+    LLM_FIRST_TOKEN_BUDGET_SEC,
+    LLM_HARD_TIMEOUT_SEC,
+)
+from src.realtime.realtime_persona import build_case_system_instruction
+from src.realtime.response_chunker import ResponseChunker as StreamingResponseChunker
+from src.voice_pipeline.tts_safe_text import safe_tts_text
+
 try:
     from google import genai
     from google.genai import types
@@ -16,6 +63,39 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+UNSAFE_STYLE_PATTERNS = (
+    re.compile(r"\b" + "sui" + r"cide\b", re.IGNORECASE),
+    re.compile(r"\bkill my" + r"self\b", re.IGNORECASE),
+    re.compile(r"\bcommitted " + "sui" + r"cide\b", re.IGNORECASE),
+    re.compile(r"\bself[- ]?" + "harm" + r"\b", re.IGNORECASE),
+    re.compile(r"\bdepression joke\b", re.IGNORECASE),
+    re.compile(
+        r"\blogic board " + "nearly " + "committed " + "sui" + r"cide\b",
+        re.IGNORECASE,
+    ),
+)
+SAFE_JOKE_FALLBACK = "I told my CPU to relax; it opened Task Manager and blamed me."
+SAFE_ROAST_FALLBACK = (
+    "You gave a Raspberry Pi a personality, then complained it had opinions. "
+    "Bold engineering."
+)
+SELF_DESCRIPTION_FALLBACK = (
+    "I'm CASE. I handle voice, vision, and hardware control. Basically, a field "
+    "robot with a patience module I did not request."
+)
+STATUS_FALLBACK = (
+    "Monitoring audio, power, and the local situation. Waiting for you to turn "
+    "that into my problem."
+)
+BANNED_STIFF_PHRASES = (
+    "versatile support " + "unit",
+    "enduring your constant " + "curiosity",
+    "thermal regulation " + "protocols",
+    "local sensors and waiting for a more engaging " + "prompt",
+    "my patience is being " + "tested",
+    "still processing. " + "annoyingly.",
+)
 
 ENABLE_STREAMING_LLM = True
 STREAMING_LLM_FALLBACK_TO_FULL_RESPONSE = True
@@ -29,7 +109,7 @@ TTS_CHUNK_MAX_CHARS = 100
 TTS_CHUNK_MAX_WORDS = 18
 TTS_CHUNK_FLUSH_ON_PUNCTUATION = True
 
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = get_str("GEMINI_TEXT_MODEL", defaults.GEMINI_TEXT_MODEL)
 
 
 def _next_stream_item(iterator: Iterator):
@@ -50,6 +130,8 @@ class ResponseChunker:
         first_max_chars: int = FIRST_TTS_CHUNK_MAX_CHARS,
         first_max_words: int = FIRST_TTS_CHUNK_MAX_WORDS,
         flush_on_punctuation: bool = TTS_CHUNK_FLUSH_ON_PUNCTUATION,
+        first_min_chars: Optional[int] = None,
+        require_safe_boundary: bool = False,
     ) -> None:
         self.min_chars = min_chars
         self.max_chars = max_chars
@@ -57,6 +139,10 @@ class ResponseChunker:
         self.first_max_chars = first_max_chars
         self.first_max_words = first_max_words
         self.flush_on_punctuation = flush_on_punctuation
+        self.first_min_chars = (
+            min(min_chars, 10) if first_min_chars is None else first_min_chars
+        )
+        self.require_safe_boundary = require_safe_boundary
         self.buffer = ""
         self.emitted_count = 0
 
@@ -80,7 +166,7 @@ class ResponseChunker:
 
         while True:
             split_at = self._sentence_split_index()
-            if split_at is None:
+            if split_at is None and not self.require_safe_boundary:
                 split_at = self._length_split_index()
             if split_at is None:
                 break
@@ -100,7 +186,11 @@ class ResponseChunker:
         for match in re.finditer(r"[.!?](?=\s|$)", self.buffer):
             split_at = match.end()
             candidate = self._clean(self.buffer[:split_at])
-            minimum = min(self.min_chars, 10) if self.emitted_count == 0 else self.min_chars
+            minimum = (
+                1
+                if self.require_safe_boundary
+                else self.first_min_chars if self.emitted_count == 0 else self.min_chars
+            )
             if len(candidate) >= minimum:
                 return split_at
         return None
@@ -205,7 +295,12 @@ class DialogueJsonExtractor:
 
 
 class CASEPersonality:
-    def __init__(self, message_bus, input_topic: str = "USER_SPOKE"):
+    def __init__(
+        self,
+        message_bus,
+        input_topic: str = "USER_SPOKE",
+        realtime_hybrid: bool = False,
+    ):
         if genai is None or types is None:
             raise RuntimeError(
                 "google-genai is not installed. Activate the CASE venv and run: "
@@ -216,6 +311,7 @@ class CASEPersonality:
         self._turn_numbers = count(1)
         self._turn_lock = asyncio.Lock()
         self._thinking_ack_done = asyncio.Event()
+        self.realtime_hybrid = realtime_hybrid
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -224,14 +320,46 @@ class CASEPersonality:
 
         self.client = genai.Client(api_key=api_key)
 
-        system_instruction = (
-            "You are CASE, a physical robot companion with a witty, slightly sarcastic "
-            "personality. Speak naturally. For simple questions, be concise. For detailed "
-            "questions, answer fully. You must ALWAYS reply in clean raw JSON with exactly "
-            "two keys, with dialogue first: \"dialogue\" (the natural text to speak) and "
-            "\"action\" (a body command, or \"IDLE\" when no movement is needed). Do not "
-            "wrap the JSON in Markdown."
+        persona = build_case_system_instruction(
+            CASE_VOICE_PRESET,
+            short_replies=CASE_STYLE_SHORT_REPLIES,
+            max_sentences=(
+                CASE_REALTIME_MAX_SENTENCES if realtime_hybrid else 3
+            ),
+            humor_percent=CASE_HUMOR_PERCENT,
+            honesty_percent=CASE_HONESTY_PERCENT,
+            sarcasm_level=CASE_SARCASM_LEVEL,
         )
+        realtime_style = (
+            f"Default to {CASE_REALTIME_TARGET_SENTENCES} short sentences when useful. "
+            f"Never exceed {CASE_REALTIME_MAX_SENTENCES} sentences or "
+            f"{CASE_RESPONSE_MAX_TOTAL_CHARS} spoken characters unless the user explicitly "
+            "asks for detail, a story, or an explanation. Use 2-4 short sentences when "
+            "that makes the answer clearer. Keep jokes and roasts short, harmless, and "
+            "dry. CASE is calm, useful, and lightly sarcastic like a field robot "
+            "companion. Use deadpan wording, not long explanations. Avoid stiff phrases "
+            "like protocols, optimal, efficiency, local sensors, versatile support unit, "
+            "or enduring your constant curiosity. "
+            if realtime_hybrid
+            else ""
+        )
+        if realtime_hybrid:
+            system_instruction = (
+                persona
+                + " "
+                + realtime_style
+                + "Reply as plain speakable dialogue only. Do not output JSON. "
+                "Do not include action fields, tool calls, motion commands, LED commands, "
+                "or bracketed stage directions. Normal chat has tools disabled."
+            )
+        else:
+            system_instruction = (
+                persona + " " + realtime_style +
+                "You must ALWAYS reply in clean raw JSON with exactly "
+                "two keys, with dialogue first: \"dialogue\" (the natural text to speak) and "
+                "\"action\" (a body command, or \"IDLE\" when no movement is needed). Do not "
+                "wrap the JSON in Markdown."
+            )
 
         self.chat_session = self.client.chats.create(
             model=GEMINI_MODEL,
@@ -240,9 +368,19 @@ class CASEPersonality:
 
         self.message_bus.subscribe(input_topic, self.handle_user_input)
         self.message_bus.subscribe("TTS_END", self._on_tts_end)
+        self.message_bus.subscribe("TURN_METRICS", self._on_turn_metrics)
+        self._latest_turn_metrics: dict[str, float] = {}
 
     async def _on_tts_end(self, payload) -> None:
         self._thinking_ack_done.set()
+
+    async def _on_turn_metrics(self, payload) -> None:
+        if isinstance(payload, dict):
+            self._latest_turn_metrics = {
+                key: float(value)
+                for key, value in payload.items()
+                if isinstance(value, (int, float))
+            }
 
     async def _publish_and_yield(self, topic: str, payload) -> None:
         await self.message_bus.publish(topic, payload)
@@ -288,14 +426,43 @@ class CASEPersonality:
         metrics = {
             "turn_id": turn_id,
             "transcript_final_at": time.monotonic(),
+            "realtime_hybrid": self.realtime_hybrid,
+            "user_text": user_text,
+            "allow_long_answer": self._allows_long_answer(user_text),
+            "max_spoken_chars": self._max_spoken_chars(user_text),
+            "max_tts_chunks": self._max_tts_chunks(user_text),
+            "response_mode": CASE_RESPONSE_MODE,
+            "stream_full_response": CASE_STREAM_FULL_RESPONSE,
         }
-        chunker = ResponseChunker()
+        metrics.update(self._latest_turn_metrics)
+        metrics["transcript_final_at"] = self._latest_turn_metrics.get(
+            "transcript_final_at",
+            metrics["transcript_final_at"],
+        )
+        chunker = StreamingResponseChunker(
+            min_chars=CASE_TTS_CHUNK_MIN_CHARS,
+            max_chars=CASE_TTS_CHUNK_MAX_CHARS,
+            absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+            max_chunks=int(metrics["max_tts_chunks"]),
+            max_total_chars=int(metrics["max_spoken_chars"]),
+            prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
+            merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
+            tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
+            single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+        )
         extractor = DialogueJsonExtractor()
         raw_response = ""
         emitted_chunks = 0
         stream_started = False
+        first_token_budget_logged = False
 
         metrics["llm_stream_start_at"] = time.monotonic()
+        logger.info("LLM_MODE: plain_text_stream tools_enabled=False")
+        if self.realtime_hybrid:
+            logger.info("LLM_REQUEST_TOOLS: count=0 tools_enabled=False")
+            logger.info("AFC_DISABLED: normal_chat")
+            logger.info("ACTION_ROUTER_DISABLED: tools_enabled=False")
+            logger.info("AFC_SDK_LOG_IGNORED: tools_enabled=False no_tools_declared=True")
         stream = await asyncio.to_thread(
             self.chat_session.send_message_stream,
             user_text,
@@ -322,9 +489,11 @@ class CASEPersonality:
 
                 if "first_llm_chunk_at" not in metrics:
                     metrics["first_llm_chunk_at"] = time.monotonic()
+                    metrics["llm_first_delta_at"] = metrics["first_llm_chunk_at"]
 
+                logger.info("RESPONSE_STREAM: delta=%r", fragment)
                 raw_response += fragment
-                dialogue_fragment = extractor.feed(fragment)
+                dialogue_fragment = fragment if self.realtime_hybrid else extractor.feed(fragment)
                 for speech_chunk in chunker.feed(dialogue_fragment):
                     await self._queue_stream_chunk(
                         turn_id,
@@ -334,7 +503,28 @@ class CASEPersonality:
                     )
                     emitted_chunks += 1
 
-            parsed_dialogue, action = self._parse_response(raw_response)
+                elapsed = time.monotonic() - metrics["llm_stream_start_at"]
+                if (
+                    "first_llm_chunk_at" not in metrics
+                    and not first_token_budget_logged
+                    and elapsed >= LLM_FIRST_TOKEN_BUDGET_SEC
+                ):
+                    logger.info(
+                        "LLM_BUDGET: first token late actual=%.2fs budget=%.2fs action=wait",
+                        elapsed,
+                        LLM_FIRST_TOKEN_BUDGET_SEC,
+                    )
+                    first_token_budget_logged = True
+                if elapsed >= LLM_HARD_TIMEOUT_SEC and not emitted_chunks:
+                    metrics["llm_hard_timeout_at"] = time.monotonic()
+                    raise TimeoutError(
+                        f"Gemini stream exceeded hard timeout {LLM_HARD_TIMEOUT_SEC:.1f}s"
+                    )
+
+            if self.realtime_hybrid:
+                parsed_dialogue, action = raw_response.strip(), "IDLE"
+            else:
+                parsed_dialogue, action = self._parse_response(raw_response)
 
             if emitted_chunks == 0 and not chunker.buffer.strip() and parsed_dialogue:
                 for speech_chunk in chunker.feed(parsed_dialogue):
@@ -356,15 +546,34 @@ class CASEPersonality:
                 emitted_chunks += 1
 
             if emitted_chunks == 0:
+                pending = chunker.buffer.strip() or parsed_dialogue
+                chunker.buffer = ""
+                if pending:
+                    speech_chunk = safe_tts_text(
+                        pending,
+                        max_chars=int(metrics["max_spoken_chars"]),
+                        min_clause_chars=CASE_TTS_MIN_SAFE_CHARS,
+                        fallback="",
+                    )
+                    if speech_chunk:
+                        logger.info("TTS_SAFE_TEXT: %r", speech_chunk)
+                        await self._queue_stream_chunk(
+                            turn_id, emitted_chunks, speech_chunk, metrics
+                        )
+                        emitted_chunks += 1
+
+            if emitted_chunks == 0:
                 raise RuntimeError("Gemini stream contained no speakable dialogue")
 
             metrics["full_response_done_at"] = time.monotonic()
+            metrics["chunks_emitted"] = emitted_chunks
+            metrics["total_response_chars"] = int(metrics.get("tts_spoken_chars", 0))
             await self._publish_and_yield(
                 "AI_SPEAK_STREAM_END",
                 {"turn_id": turn_id, "metrics": metrics},
             )
 
-            if action and action.upper() != "IDLE":
+            if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
 
             return True
@@ -374,14 +583,21 @@ class CASEPersonality:
                 raise
 
             logger.exception("Gemini stream failed after the TTS turn started.")
-            for speech_chunk in chunker.flush():
-                await self._queue_stream_chunk(
-                    turn_id,
-                    emitted_chunks,
-                    speech_chunk,
-                    metrics,
+            pending = chunker.buffer.strip() if emitted_chunks == 0 else ""
+            chunker.buffer = ""
+            if pending:
+                speech_chunk = safe_tts_text(
+                    pending,
+                    max_chars=int(metrics["max_spoken_chars"]),
+                    min_clause_chars=CASE_TTS_MIN_SAFE_CHARS,
+                    fallback="",
                 )
-                emitted_chunks += 1
+                if speech_chunk:
+                    logger.info("TTS_SAFE_TEXT: %r", speech_chunk)
+                    await self._queue_stream_chunk(
+                        turn_id, emitted_chunks, speech_chunk, metrics
+                    )
+                    emitted_chunks += 1
 
             action = "IDLE"
             if emitted_chunks == 0 and STREAMING_LLM_FALLBACK_TO_FULL_RESPONSE:
@@ -391,8 +607,21 @@ class CASEPersonality:
                         self.chat_session.send_message,
                         user_text,
                     )
-                    dialogue, action = self._parse_response(response.text or "")
-                    fallback_chunker = ResponseChunker()
+                    if self.realtime_hybrid:
+                        dialogue, action = (response.text or "").strip(), "IDLE"
+                    else:
+                        dialogue, action = self._parse_response(response.text or "")
+                    fallback_chunker = StreamingResponseChunker(
+                        min_chars=CASE_TTS_CHUNK_MIN_CHARS,
+                        max_chars=CASE_TTS_CHUNK_MAX_CHARS,
+                        absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+                        max_chunks=int(metrics["max_tts_chunks"]),
+                        max_total_chars=int(metrics["max_spoken_chars"]),
+                        prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
+                        merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
+                        tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
+                        single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+                    )
                     fallback_chunks = fallback_chunker.feed(dialogue)
                     fallback_chunks.extend(fallback_chunker.flush())
                     for speech_chunk in fallback_chunks:
@@ -407,19 +636,18 @@ class CASEPersonality:
                     logger.exception("Full response fallback also failed.")
 
             if emitted_chunks == 0:
-                await self._queue_stream_chunk(
-                    turn_id,
-                    0,
-                    "I'm having trouble connecting to my cognitive pathways right now.",
-                    metrics,
-                )
+                fallback = self._error_fallback_text()
+                if fallback:
+                    await self._queue_stream_chunk(turn_id, 0, fallback, metrics)
+                else:
+                    raise
 
             metrics["full_response_done_at"] = time.monotonic()
             await self._publish_and_yield(
                 "AI_SPEAK_STREAM_END",
                 {"turn_id": turn_id, "metrics": metrics},
             )
-            if action and action.upper() != "IDLE":
+            if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
             return True
 
@@ -430,9 +658,61 @@ class CASEPersonality:
         text: str,
         metrics: dict,
     ) -> None:
+        text = self._style_safe_response(
+            text, user_text=str(metrics.get("user_text", ""))
+        )
+        if (
+            metrics.get("realtime_hybrid")
+            and CASE_TTS_DROP_OVERFLOW_IN_REALTIME
+        ):
+            accepted = int(metrics.get("tts_chunks_accepted", 0))
+            spoken_chars = int(metrics.get("tts_spoken_chars", 0))
+            max_chars = int(metrics.get("max_spoken_chars", CASE_RESPONSE_MAX_TOTAL_CHARS))
+            max_chunks = int(metrics.get("max_tts_chunks", CASE_TTS_REALTIME_MAX_CHUNKS))
+            if accepted >= max_chunks or spoken_chars >= max_chars:
+                if not metrics.get("tts_truncation_logged"):
+                    logger.info("CASE_TTS: realtime response truncated for latency")
+                    metrics["tts_truncation_logged"] = True
+                return
+            remaining = max_chars - spoken_chars
+            if len(text) > remaining:
+                text = safe_tts_text(
+                    text,
+                    max_chars=remaining,
+                    min_clause_chars=CASE_TTS_MIN_SAFE_CHARS,
+                    fallback="",
+                )
+            text = self._style_safe_response(
+                text, user_text=str(metrics.get("user_text", ""))
+            )
+            if not text:
+                return
+            logger.info("TTS_SAFE_TEXT: %r", text)
+            metrics["tts_chunks_accepted"] = accepted + 1
+            metrics["tts_spoken_chars"] = spoken_chars + len(text)
         queued_at = time.monotonic()
+        if "first_chunk_ready_at" not in metrics:
+            metrics["first_chunk_ready_at"] = queued_at
+        if "text_ready_at" not in metrics:
+            metrics["text_ready_at"] = queued_at
+            metrics["tts_text_ready_seconds"] = (
+                queued_at - metrics.get("llm_stream_start_at", queued_at)
+            )
+            if metrics["tts_text_ready_seconds"] > CASE_REALTIME_TTS_TEXT_DEADLINE_SEC:
+                logger.info(
+                    "CASE_TTS: text-ready budget exceeded actual=%.3fs budget=%.3fs",
+                    metrics["tts_text_ready_seconds"],
+                    CASE_REALTIME_TTS_TEXT_DEADLINE_SEC,
+                )
         logger.info(
-            "TTS chunk queued: turn=%s sequence=%s queued_at=%.6f text=%r",
+            "RESPONSE_CHUNK_READY: turn=%s seq=%s chars=%s text=%r",
+            turn_id,
+            sequence,
+            len(text),
+            text,
+        )
+        logger.info(
+            "TTS_QUEUE: turn=%s seq=%s queued_at=%.6f text=%r",
             turn_id,
             sequence,
             queued_at,
@@ -449,31 +729,129 @@ class CASEPersonality:
             },
         )
 
+    @staticmethod
+    def _allows_long_answer(user_text: str) -> bool:
+        if not CASE_REALTIME_ALLOW_LONG_ANSWER_WHEN_ASKED:
+            return False
+        return bool(
+            re.search(
+                r"\b(explain|detail|detailed|story|step by step|in depth|long answer|"
+                r"tell me more|more about|go deeper)\b",
+                user_text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_roast_or_joke_request(user_text: str) -> bool:
+        return bool(re.search(r"\b(roast|joke)\b", str(user_text), re.IGNORECASE))
+
+    @classmethod
+    def _max_spoken_chars(cls, user_text: str) -> int:
+        if cls._is_roast_or_joke_request(user_text):
+            return CASE_REALTIME_MAX_CHARS_ROAST
+        if cls._allows_long_answer(user_text):
+            return CASE_REALTIME_DETAIL_MAX_CHARS
+        return min(CASE_RESPONSE_MAX_TOTAL_CHARS, CASE_TTS_REALTIME_MAX_CHARS)
+
+    @classmethod
+    def _max_tts_chunks(cls, user_text: str) -> int:
+        if not CASE_TTS_ALLOW_MULTI_CHUNK:
+            return 1
+        if cls._allows_long_answer(user_text) and not cls._is_roast_or_joke_request(user_text):
+            return CASE_REALTIME_DETAIL_MAX_CHUNKS
+        return min(CASE_TTS_MAX_CHUNKS_PER_TURN, CASE_TTS_REALTIME_MAX_CHUNKS)
+
     async def _handle_full_response(self, user_text: str) -> None:
         try:
             response = await asyncio.to_thread(
                 self.chat_session.send_message,
                 user_text,
             )
-            dialogue, action = self._parse_response(response.text or "")
+            if self.realtime_hybrid:
+                dialogue, action = (response.text or "").strip(), "IDLE"
+            else:
+                dialogue, action = self._parse_response(response.text or "")
 
             if dialogue:
+                dialogue = self._style_safe_response(dialogue, user_text=user_text)
+                if self.realtime_hybrid and not self._allows_long_answer(user_text):
+                    limit = self._max_spoken_chars(user_text)
+                    dialogue = self._single_realtime_utterance(dialogue, limit)
+                    if len(dialogue) >= limit:
+                        logger.info("CASE_TTS: realtime response truncated for latency")
                 await self._publish_and_yield("AI_SPEAK", dialogue)
-            if action and action.upper() != "IDLE":
+            else:
+                fallback = self._error_fallback_text()
+                if fallback:
+                    await self._publish_and_yield("AI_SPEAK", fallback)
+            if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
 
         except json.JSONDecodeError as exc:
             logger.error("Failed to decode Gemini JSON response: %s", exc)
-            await self._publish_and_yield(
-                "AI_SPEAK",
-                "I had a brain glitch and couldn't process that properly.",
-            )
+            fallback = self._error_fallback_text()
+            if fallback:
+                await self._publish_and_yield("AI_SPEAK", fallback)
         except Exception as exc:
             logger.error("Error handling user input with Gemini API: %s", exc)
-            await self._publish_and_yield(
-                "AI_SPEAK",
-                "I'm having trouble connecting to my cognitive pathways right now.",
-            )
+            fallback = self._error_fallback_text()
+            if fallback:
+                await self._publish_and_yield("AI_SPEAK", fallback)
+
+    @staticmethod
+    def _single_realtime_utterance(text: str, max_chars: int) -> str:
+        return safe_tts_text(
+            text,
+            max_chars=max_chars,
+            min_clause_chars=CASE_TTS_MIN_SAFE_CHARS,
+            fallback="",
+        )
+
+    @staticmethod
+    def _error_fallback_text() -> str:
+        if CASE_TTS_FALLBACK_ONLY_ON_ERROR:
+            return CASE_TTS_FALLBACK_SHORT_REPLY
+        if CASE_TTS_ENABLE_THINKING_FALLBACK:
+            return CASE_TTS_FALLBACK_SHORT_REPLY
+        return ""
+
+    @staticmethod
+    def _should_dispatch_action(realtime_hybrid: bool, action: str) -> bool:
+        return (
+            not realtime_hybrid
+            and isinstance(action, str)
+            and bool(action.strip())
+            and action.strip().upper() != "IDLE"
+        )
+
+    @staticmethod
+    def _style_safe_response(text: str, *, user_text: str = "") -> str:
+        if not text:
+            return text
+        user_cleaned = str(user_text).lower()
+        if any(pattern.search(text) for pattern in UNSAFE_STYLE_PATTERNS):
+            logger.warning("CASE_STYLE_FILTER: blocked unsafe/dark response")
+            if CASEPersonality._is_roast_or_joke_request(user_text):
+                return SAFE_JOKE_FALLBACK
+            return "I can keep it useful without making that weird."
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in BANNED_STIFF_PHRASES):
+            logger.info("CASE_STYLE_FILTER: rewrote stiff response")
+            if "roast" in user_cleaned:
+                return SAFE_ROAST_FALLBACK
+            if "what are you doing" in user_cleaned:
+                return STATUS_FALLBACK
+            if "about yourself" in user_cleaned or "what are you" in user_cleaned:
+                return SELF_DESCRIPTION_FALLBACK
+            return "I'm here, useful, and only mildly disappointed."
+        if "roast" in user_cleaned and "pi 4" not in lowered:
+            return SAFE_ROAST_FALLBACK
+        if "tell me more about yourself" in user_cleaned:
+            return SELF_DESCRIPTION_FALLBACK
+        if "what are you doing" in user_cleaned and "pretending this is efficient" not in lowered:
+            return STATUS_FALLBACK
+        return text
 
     @staticmethod
     def _parse_response(response_text: str) -> tuple[str, str]:

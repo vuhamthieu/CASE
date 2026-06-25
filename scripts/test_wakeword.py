@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
         help="Multiply microphone audio before wake word inference. Default: 1.0.",
     )
     parser.add_argument(
+        "--device",
+        help="Input device index or name from `python3 -m sounddevice`.",
+    )
+    parser.add_argument(
         "--debug-audio",
         action="store_true",
         help="Print raw audio, resampled audio, frame, and prediction diagnostics.",
@@ -246,6 +250,7 @@ def build_listener(args: argparse.Namespace, model_paths: list[Path]) -> WakeWor
         save_debug_seconds=args.save_debug_seconds,
         frame_scores=args.frame_scores,
         record_false_positive_dir=args.record_false_positive_dir,
+        input_device=args.device,
     )
 
 
