@@ -3,6 +3,10 @@ import unittest
 from src.realtime.response_chunker import ResponseChunker
 
 
+def normalized(text: str) -> str:
+    return " ".join(text.split())
+
+
 class ResponseChunkerTests(unittest.TestCase):
     def test_chunks_at_sentence_boundaries(self):
         chunker = ResponseChunker(
@@ -171,6 +175,52 @@ class ResponseChunkerTests(unittest.TestCase):
         chunks.extend(chunker.flush())
         self.assertLessEqual(len(chunks), 2)
         self.assertLessEqual(sum(len(chunk) for chunk in chunks), 80)
+
+    def test_final_flush_does_not_drop_short_tail(self):
+        full = (
+            "I tried to explain to my motherboard that I needed a vacation. "
+            "It just blinked its power LED and told me to get back to work."
+        )
+        chunker = ResponseChunker(
+            min_chars=35,
+            max_chars=55,
+            absolute_max_chars=70,
+            max_chunks=2,
+            max_total_chars=260,
+            merge_tiny_chunks=False,
+        )
+        chunks = []
+        chunks.extend(
+            chunker.feed(
+                "I tried to explain to my motherboard that I needed a vacation. "
+            )
+        )
+        chunks.extend(
+            chunker.feed("It just blinked its power LED and told me to ")
+        )
+        chunks.extend(chunker.feed("get back to work."))
+        chunks.extend(chunker.flush())
+        self.assertEqual(normalized(" ".join(chunks)), normalized(full))
+
+    def test_comma_partial_sentence_flush_preserves_final_words(self):
+        full = (
+            "Fine, I will tell you a joke, but I am filing it under emotional "
+            "labor."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=45,
+            absolute_max_chars=65,
+            max_chunks=2,
+            max_total_chars=220,
+            merge_tiny_chunks=False,
+        )
+        chunks = []
+        chunks.extend(chunker.feed("Fine, I will tell you a joke, but I am "))
+        chunks.extend(chunker.feed("filing it under emotional "))
+        chunks.extend(chunker.feed("labor."))
+        chunks.extend(chunker.flush())
+        self.assertEqual(normalized(" ".join(chunks)), normalized(full))
 
 
 if __name__ == "__main__":

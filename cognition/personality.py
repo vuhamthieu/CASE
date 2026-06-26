@@ -537,6 +537,11 @@ class CASEPersonality:
                     emitted_chunks += 1
 
             for speech_chunk in chunker.flush():
+                logger.info(
+                    "RESPONSE_FINAL_FLUSH: chars=%s text=%r",
+                    len(speech_chunk),
+                    speech_chunk,
+                )
                 await self._queue_stream_chunk(
                     turn_id,
                     emitted_chunks,

@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -123,6 +124,16 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults.AUDIO_PLAYBACK_BACKEND, "sounddevice")
         self.assertTrue(defaults.AUDIO_PLAYBACK_KEEP_STREAM_OPEN)
         self.assertFalse(defaults.WAKE_ACK_USE_VOICE_BACKEND)
+
+    def test_profile_logs_are_labeled_separately(self):
+        main_source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+        self.assertIn("STT_PROFILE: %s", main_source)
+        self.assertIn("LATENCY_PROFILE: %s", main_source)
+        self.assertIn("STT_FINAL_MODE: %s", main_source)
+        self.assertNotIn(
+            "HYBRID_LATENCY: profile=%s transcript_backend=%s",
+            main_source,
+        )
         self.assertEqual(defaults.WAKE_ACK_MODE, "cached_wav")
         self.assertFalse(defaults.WAKE_ACK_RECORDED_ENABLED)
         self.assertEqual(

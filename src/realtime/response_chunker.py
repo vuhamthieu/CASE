@@ -107,10 +107,30 @@ class ResponseChunker:
         chunks: list[str] = []
 
         while not self.exhausted:
+            if final and self.emitted_count == self.config.max_chunks - 1:
+                split_at = len(self.buffer)
+                candidate = self._clean(self.buffer)
+                if not candidate:
+                    break
+                self.buffer = ""
+                candidate = self._fit_total_budget(candidate)
+                if not candidate:
+                    break
+                chunks.append(candidate)
+                self.emitted_count += 1
+                self.emitted_chars += len(candidate)
+                break
+
             split_at = self._find_split(final=final)
             if split_at is None:
                 break
             candidate = self._clean(self.buffer[:split_at])
+            if (
+                not final
+                and self.emitted_count == self.config.max_chunks - 1
+                and not candidate.endswith((".", "?", "!"))
+            ):
+                break
             if final and self._should_hold_short_response(candidate):
                 split_at = len(self.buffer)
                 candidate = self._clean(self.buffer)

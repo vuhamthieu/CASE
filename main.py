@@ -41,6 +41,7 @@ from src.vision.vision_scheduler import (
 from src.cognition.intent_router import IntentRouter
 from src.realtime import resolve_voice_mode
 from src.realtime.realtime_config import (
+    CASE_STT_PROFILE,
     HYBRID_LATENCY_PROFILE,
     HYBRID_MUTE_MIC_DURING_TTS,
     HYBRID_RESUME_MIC_AFTER_TTS_DELAY_SEC,
@@ -372,11 +373,9 @@ async def boot_sequence():
             logger.info("VOICE_OUTPUT_BACKEND: %s", VOICE_OUTPUT_BACKEND)
             if VOICE_OUTPUT_BACKEND == "piper_onnx":
                 logger.info("PIPER_ONNX: active for CASE_TTS")
-            logger.info(
-                "HYBRID_LATENCY: profile=%s transcript_backend=%s",
-                HYBRID_LATENCY_PROFILE,
-                TRANSCRIPT_INPUT_BACKEND,
-            )
+            logger.info("STT_PROFILE: %s", CASE_STT_PROFILE)
+            logger.info("LATENCY_PROFILE: %s", HYBRID_LATENCY_PROFILE)
+            logger.info("STT_FINAL_MODE: %s", TRANSCRIPT_INPUT_BACKEND)
             logger.info("GEMINI_LIVE_NATIVE_AUDIO: disabled")
         logger.info(
             "VOICE_MODE: realtime pipeline=%s (local wake word, shared microphone stream)",

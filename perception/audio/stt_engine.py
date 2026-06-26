@@ -28,7 +28,9 @@ from src.audio.input_device import configured_input_device
 from src.config import defaults as case_defaults
 from src.config.env import get_bool, get_str
 from src.realtime.realtime_config import (
+    CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT,
     CASE_STT_FINAL_BACKEND,
+    CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC,
     CASE_STT_PROFILE,
     GTCRN_MODEL_PATH,
     HYBRID_HOLD_WEAK_ENDING_SEC,
@@ -128,6 +130,16 @@ WAKE_CLEAR_RING_BUFFER_ON_STATE_CHANGE = get_bool(
 WAKE_REJECT_STALE_AUDIO_FRAMES = get_bool("WAKE_REJECT_STALE_AUDIO_FRAMES", True)
 WAKE_COOLDOWN_AFTER_IGNORED_TRANSCRIPT_SEC = _env_float(
     "WAKE_COOLDOWN_AFTER_IGNORED_TRANSCRIPT_SEC", 1.5
+)
+FAST_INTENT_PATTERNS = (
+    r"\b(tell me|say|make)\s+(a\s+)?joke\b",
+    r"\btell me something funny\b",
+    r"\b(can you\s+)?roast me\b",
+    r"\btell me about yourself\b",
+    r"\b(can you\s+)?see me\b",
+    r"\blook around\b",
+    r"\bstop\b",
+    r"\bcancel\b",
 )
 
 STATE_IDLE = "IDLE"
@@ -328,6 +340,10 @@ class STTEngine:
         self.final_vosk_model_path: Optional[Path] = None
         self.final_mode = "vosk_small"
         self.final_fallback_mode = ""
+        self.lgraph_final_timeout_sec = max(0.0, CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC)
+        self.accept_fast_candidate_on_timeout = (
+            CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT
+        )
         self.wakeword_model_path = self._resolve_path(wakeword_model_path)
         self.samplerate = samplerate
         self.input_device = (
@@ -378,6 +394,10 @@ class STTEngine:
         self.denoiser: Optional[GtcrnDenoiser] = None
         self.sensevoice: Optional[SherpaSenseVoiceBackend] = None
         self.final_vosk_model: Optional[VoskModel] = None
+        self._final_stt_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="case-stt-final",
+        )
 
         self.audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=512)
         self._stop_event = threading.Event()
@@ -1282,6 +1302,96 @@ class STTEngine:
         recognizer.AcceptWaveform(np.asarray(waveform, dtype="<i2").tobytes())
         return self._parse_vosk_text(recognizer, final=True)
 
+    def _is_clear_fast_intent(self, text: str) -> bool:
+        cleaned = self._normalize_transcript(text)
+        if not cleaned:
+            return False
+        return any(
+            re.search(pattern, cleaned, flags=re.IGNORECASE)
+            for pattern in FAST_INTENT_PATTERNS
+        )
+
+    def _transcribe_lgraph_timeboxed(
+        self,
+        waveform: np.ndarray,
+        *,
+        fallback_candidate: str,
+    ) -> tuple[str, str | None]:
+        timeout = max(0.0, float(self.lgraph_final_timeout_sec))
+        logging.info(
+            "STT_FINAL_TIMEBOX: backend=vosk_lgraph timeout=%.2fs",
+            timeout,
+        )
+        future = self._final_stt_executor.submit(self._transcribe_final_vosk, waveform)
+        try:
+            text = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            logging.warning(
+                "STT_FINAL_TIMEOUT: backend=vosk_lgraph fallback=vosk_small "
+                "candidate=%r",
+                fallback_candidate,
+            )
+            return "", "lgraph_timeout"
+        except Exception as exc:
+            logging.warning(
+                "Vosk lgraph final decode failed; using fallback: %s",
+                exc,
+            )
+            return "", str(exc)
+        if is_usable_transcript(text):
+            return text, None
+        return text, "lgraph_empty"
+
+    def _select_final_transcript_for_utterance(
+        self,
+        *,
+        vosk_candidate: str,
+        sense_text: str,
+        waveform: np.ndarray,
+        backend_status: dict,
+    ) -> tuple[str, str]:
+        if is_usable_transcript(vosk_candidate) and self._is_clear_fast_intent(
+            vosk_candidate
+        ):
+            backend_status["selected_source"] = "vosk_small"
+            return dedupe_repeated_transcript(vosk_candidate), "clear_fast_intent"
+
+        lgraph_text = ""
+        reason = "profile_chain"
+        needs_lgraph_candidate = (
+            self.final_mode == "vosk_lgraph"
+            or bool(backend_status.get("sensevoice_error"))
+            or not is_usable_transcript(sense_text)
+        )
+        if (
+            "vosk_lgraph" in self.stt_plan.final_chain
+            and self.vosk_lgraph_model_path.is_dir()
+            and waveform.size
+            and needs_lgraph_candidate
+        ):
+            lgraph_text, lgraph_error = self._transcribe_lgraph_timeboxed(
+                waveform,
+                fallback_candidate=vosk_candidate,
+            )
+            if lgraph_error:
+                backend_status["vosk_lgraph_error"] = lgraph_error
+                if lgraph_error == "lgraph_timeout":
+                    reason = "lgraph_timeout"
+            elif is_usable_transcript(lgraph_text):
+                reason = "final_ready_within_timeout"
+                logging.info("Vosk lgraph final candidate: %r", lgraph_text)
+
+        selected = choose_final_transcript(
+            vosk_candidate,
+            sense_text,
+            backend_status,
+            lgraph_candidate=lgraph_text,
+        )
+        if reason == "profile_chain" and backend_status.get("selected_source") == "vosk_small":
+            reason = "fallback"
+        return selected, reason
+
     @staticmethod
     def _join_transcript_parts(parts: list[str]) -> str:
         return " ".join(part.strip() for part in parts if part.strip()).strip()
@@ -1378,7 +1488,6 @@ class STTEngine:
                 [*transcript_parts, vosk_final]
             )
             sense_text = ""
-            lgraph_text = ""
             waveform = (
                 np.concatenate(utterance_frames)
                 if utterance_frames
@@ -1409,37 +1518,17 @@ class STTEngine:
                 except Exception as exc:
                     logging.warning("SenseVoice decode failed; using Vosk result: %s", exc)
                     backend_status["sensevoice_error"] = str(exc)
-            needs_lgraph_candidate = (
-                self.final_mode == "vosk_lgraph"
-                or bool(backend_status["sensevoice_error"])
-                or not is_usable_transcript(sense_text)
-            )
-            if (
-                "vosk_lgraph" in self.stt_plan.final_chain
-                and self.vosk_lgraph_model_path.is_dir()
-                and waveform.size
-                and needs_lgraph_candidate
-            ):
-                try:
-                    lgraph_text = self._transcribe_final_vosk(waveform)
-                    logging.info("Vosk lgraph final candidate: %r", lgraph_text)
-                except Exception as exc:
-                    logging.warning(
-                        "Vosk lgraph final decode failed; using fallback: %s",
-                        exc,
-                    )
-                    backend_status["vosk_lgraph_error"] = str(exc)
-            selected = choose_final_transcript(
-                vosk_candidate,
-                sense_text,
-                backend_status,
-                lgraph_candidate=lgraph_text,
+            selected, select_reason = self._select_final_transcript_for_utterance(
+                vosk_candidate=vosk_candidate,
+                sense_text=sense_text,
+                waveform=waveform,
+                backend_status=backend_status,
             )
             transcript_parts.clear()
             append_transcript_part(selected)
             selected_raw = {
                 "sensevoice": sense_text,
-                "vosk_lgraph": lgraph_text,
+                "vosk_lgraph": selected,
                 "vosk_small": vosk_candidate,
                 "vosk_fallback": vosk_candidate,
             }.get(backend_status["selected_source"], "")
@@ -1450,8 +1539,9 @@ class STTEngine:
                     selected,
                 )
             logging.info(
-                "TRANSCRIPT_SELECT: source=%s text=%r",
+                "TRANSCRIPT_SELECT: source=%s reason=%s text=%r",
                 backend_status["selected_source"],
+                select_reason,
                 selected,
             )
             recognizer = KaldiRecognizer(self.model, self.samplerate)
@@ -2085,6 +2175,8 @@ class STTEngine:
                     stream.close()
                 except Exception:
                     pass
+
+            self._final_stt_executor.shutdown(wait=False, cancel_futures=True)
 
             logging.info("STT shutdown complete.")
             console.system("STT stopped")
