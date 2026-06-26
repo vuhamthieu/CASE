@@ -28,6 +28,8 @@ from src.audio.input_device import configured_input_device
 from src.config import defaults as case_defaults
 from src.config.env import get_bool, get_str
 from src.realtime.realtime_config import (
+    CASE_STT_FINAL_BACKEND,
+    CASE_STT_PROFILE,
     GTCRN_MODEL_PATH,
     HYBRID_HOLD_WEAK_ENDING_SEC,
     HYBRID_REJECT_TOO_SHORT,
@@ -54,9 +56,11 @@ from src.realtime.realtime_config import (
 )
 from src.stt_backends.sherpa_sensevoice_backend import SherpaSenseVoiceBackend
 from src.stt_backends.smart_turn import SmartTurnDetector, has_weak_ending
+from src.stt_backends.stt_profile import resolve_stt_profile
 from src.stt_backends.transcript_selection import (
     choose_final_transcript,
     dedupe_repeated_transcript,
+    is_usable_transcript,
     normalize_transcript,
 )
 from src.stt_backends.transcript_repair import (
@@ -314,8 +318,16 @@ class STTEngine:
     ):
         self.bus = message_bus
         self.repo_root = Path(__file__).resolve().parents[2]
-        self.transcript_backend = TRANSCRIPT_INPUT_BACKEND
+        self.stt_plan = resolve_stt_profile(
+            CASE_STT_PROFILE,
+            CASE_STT_FINAL_BACKEND or TRANSCRIPT_INPUT_BACKEND,
+        )
+        self.transcript_backend = self.stt_plan.preferred_final_mode
         self.model_path = self._select_vosk_model_path(model_path)
+        self.vosk_lgraph_model_path = self._resolve_vosk_lgraph_model_path()
+        self.final_vosk_model_path: Optional[Path] = None
+        self.final_mode = "vosk_small"
+        self.final_fallback_mode = ""
         self.wakeword_model_path = self._resolve_path(wakeword_model_path)
         self.samplerate = samplerate
         self.input_device = (
@@ -365,6 +377,7 @@ class STTEngine:
         self.smart_turn: Optional[SmartTurnDetector] = None
         self.denoiser: Optional[GtcrnDenoiser] = None
         self.sensevoice: Optional[SherpaSenseVoiceBackend] = None
+        self.final_vosk_model: Optional[VoskModel] = None
 
         self.audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=512)
         self._stop_event = threading.Event()
@@ -406,16 +419,12 @@ class STTEngine:
     ) -> Path:
         if explicit_path is not None:
             return self._resolve_path(explicit_path)
-        if self.transcript_backend == "sherpa_sensevoice":
-            small = self._resolve_path(VOSK_SMALL_MODEL_PATH)
-            logging.info(
-                "STT_ENDPOINT_BACKEND: vosk_small model=%s "
-                "(SenseVoice provides final transcripts)",
-                small,
-            )
-            return small
-        lgraph = self._resolve_path(VOSK_LGRAPH_MODEL_PATH)
         small = self._resolve_path(VOSK_SMALL_MODEL_PATH)
+        logging.info("STT_ENDPOINT_BACKEND: vosk_small model=%s", small)
+        return small
+
+    def _resolve_vosk_lgraph_model_path(self) -> Path:
+        lgraph = self._resolve_path(VOSK_LGRAPH_MODEL_PATH)
         legacy_lgraph = self.repo_root / Path(VOSK_LGRAPH_MODEL_PATH).name
         if not lgraph.is_dir() and legacy_lgraph.is_dir():
             logging.warning(
@@ -423,20 +432,10 @@ class STTEngine:
                 lgraph,
             )
             lgraph = legacy_lgraph.resolve()
-        if lgraph.is_dir():
-            logging.info("STT_BACKEND: vosk_lgraph")
-            logging.info("STT_MODEL: %s", lgraph)
-            return lgraph
-        logging.warning(
-            "STT_BACKEND: vosk_lgraph model missing at %s; falling back to small",
-            lgraph,
-        )
-        logging.info("STT_BACKEND: vosk_small")
-        logging.info("STT_MODEL: %s", small)
-        return small
+        return lgraph
 
     def _load_optional_stt_components(self) -> None:
-        if self.transcript_backend == "sherpa_sensevoice":
+        if "sensevoice" in self.stt_plan.final_chain:
             try:
                 self.sensevoice = SherpaSenseVoiceBackend(
                     self._resolve_path(SHERPA_SENSEVOICE_MODEL_DIR)
@@ -444,11 +443,14 @@ class STTEngine:
                 logging.info("STT_BACKEND: sherpa_sensevoice final transcription enabled")
             except Exception as exc:
                 logging.warning(
-                    "STT_BACKEND: SenseVoice unavailable; using Vosk fallback: %s",
+                    "STT_BACKEND: SenseVoice unavailable: %s",
                     exc,
                 )
-                self.transcript_backend = (
-                    "vosk_lgraph" if "lgraph" in self.model_path.name else "vosk_small"
+                fallback = self._first_available_final_after("sensevoice")
+                logging.warning(
+                    "STT_PROFILE_DEGRADED: requested=%s missing=sensevoice fallback=%s",
+                    self.stt_plan.requested_label,
+                    fallback,
                 )
 
         if STT_USE_SILERO_VAD:
@@ -469,6 +471,11 @@ class STTEngine:
                     "VAD: silero unavailable; using RMS endpointing fallback: %s",
                     exc,
                 )
+                logging.info("VAD_MODE: rms_fallback")
+                logging.warning(
+                    "RUNTIME_ARTIFACTS: degraded_turn_taking missing=%s",
+                    SILERO_VAD_MODEL_PATH,
+                )
 
         if STT_USE_SMART_TURN:
             try:
@@ -486,6 +493,8 @@ class STTEngine:
                     "SMART_TURN: unavailable; using timing/weak-ending fallback: %s",
                     exc,
                 )
+                logging.info("TURN_END_MODE: vad_timing")
+                logging.info("OPTIONAL_ARTIFACT_MISSING: smart_turn")
 
         if STT_USE_GTCRN_DENOISER:
             try:
@@ -499,6 +508,83 @@ class STTEngine:
         else:
             logging.info("GTCRN: disabled (benchmark before enabling on Pi 4)")
 
+        self._configure_final_stt_runtime()
+        self._log_stt_profile_runtime()
+
+    def _final_mode_available(self, mode: str) -> bool:
+        if mode == "sensevoice":
+            return self.sensevoice is not None
+        if mode == "vosk_lgraph":
+            return self.vosk_lgraph_model_path.is_dir()
+        if mode == "vosk_small":
+            return self.model_path.is_dir()
+        return False
+
+    def _first_available_final_after(self, mode: str) -> str:
+        try:
+            start = self.stt_plan.final_chain.index(mode) + 1
+        except ValueError:
+            start = 0
+        for candidate in self.stt_plan.final_chain[start:]:
+            if self._final_mode_available(candidate):
+                return candidate
+        return "vosk_small"
+
+    def _configure_final_stt_runtime(self) -> None:
+        missing_lgraph = (
+            "vosk_lgraph" in self.stt_plan.final_chain
+            and not self.vosk_lgraph_model_path.is_dir()
+        )
+        if missing_lgraph:
+            if self.stt_plan.profile == "balanced" or self.stt_plan.final_backend == "vosk_lgraph":
+                logging.warning(
+                    "STT_PROFILE_DEGRADED: requested=%s missing=vosk_lgraph "
+                    "fallback=vosk_small accuracy=lower",
+                    self.stt_plan.requested_label,
+                )
+            else:
+                logging.warning(
+                    "STT_PROFILE_DEGRADED: requested=%s missing=vosk_lgraph "
+                    "fallback=vosk_small",
+                    self.stt_plan.requested_label,
+                )
+
+        selected = "vosk_small"
+        for candidate in self.stt_plan.final_chain:
+            if self._final_mode_available(candidate):
+                selected = candidate
+                break
+
+        self.final_mode = selected
+        self.transcript_backend = selected
+        self.final_fallback_mode = self._first_available_final_after(selected)
+        if self.final_fallback_mode == selected:
+            self.final_fallback_mode = ""
+        self.final_vosk_model_path = (
+            self.vosk_lgraph_model_path if selected == "vosk_lgraph" else None
+        )
+
+        if selected == "vosk_lgraph":
+            try:
+                self._ensure_final_vosk_model()
+            except Exception as exc:
+                logging.warning(
+                    "STT_BACKEND: vosk_lgraph failed to load; falling back to small: %s",
+                    exc,
+                )
+                self.final_mode = "vosk_small"
+                self.transcript_backend = "vosk_small"
+                self.final_fallback_mode = ""
+                self.final_vosk_model_path = None
+
+    def _log_stt_profile_runtime(self) -> None:
+        logging.info("STT_PROFILE: %s", self.stt_plan.profile)
+        logging.info("VAD_MODE: %s", "silero" if self.vad_gate is not None else "rms_fallback")
+        logging.info("STT_ENDPOINT_MODE: vosk_small")
+        logging.info("STT_FINAL_MODE: %s", self.final_mode)
+        if self.final_fallback_mode:
+            logging.info("STT_FINAL_FALLBACK: %s", self.final_fallback_mode)
+
     def _validate_wake_settings(self) -> None:
         if self.wake_min_hits < 1:
             raise ValueError("wake_min_hits must be at least 1")
@@ -508,7 +594,7 @@ class STTEngine:
             raise ValueError("wake_cooldown_sec must not be negative")
 
     def _load_vosk_model(self) -> None:
-        logging.info("Loading Vosk model from: %s", self.model_path)
+        logging.info("Loading Vosk endpoint model from: %s", self.model_path)
 
         # Vosk writes native C++ diagnostics directly to stderr. Its supported
         # log-level hook is the least invasive way to keep clean mode readable.
@@ -524,6 +610,18 @@ class STTEngine:
             )
 
         self.model = VoskModel(str(self.model_path))
+
+    def _ensure_final_vosk_model(self) -> Optional[VoskModel]:
+        if "vosk_lgraph" not in self.stt_plan.final_chain:
+            return None
+        if self.final_vosk_model is not None:
+            return self.final_vosk_model
+        path = self.final_vosk_model_path or self.vosk_lgraph_model_path
+        if not path.is_dir():
+            raise FileNotFoundError(f"Vosk lgraph model folder is missing: {path}")
+        logging.info("Loading Vosk final model from: %s", path)
+        self.final_vosk_model = VoskModel(str(path))
+        return self.final_vosk_model
 
     def _load_wakeword_model(self) -> None:
         data_path = Path(f"{self.wakeword_model_path}.data")
@@ -1176,6 +1274,14 @@ class STTEngine:
         except Exception:
             return ""
 
+    def _transcribe_final_vosk(self, waveform: np.ndarray) -> str:
+        model = self._ensure_final_vosk_model()
+        if model is None or waveform.size == 0:
+            return ""
+        recognizer = KaldiRecognizer(model, self.samplerate)
+        recognizer.AcceptWaveform(np.asarray(waveform, dtype="<i2").tobytes())
+        return self._parse_vosk_text(recognizer, final=True)
+
     @staticmethod
     def _join_transcript_parts(parts: list[str]) -> str:
         return " ".join(part.strip() for part in parts if part.strip()).strip()
@@ -1272,13 +1378,21 @@ class STTEngine:
                 [*transcript_parts, vosk_final]
             )
             sense_text = ""
+            lgraph_text = ""
+            waveform = (
+                np.concatenate(utterance_frames)
+                if utterance_frames
+                else np.empty(0, dtype=np.int16)
+            )
             backend_status = {
                 "sensevoice_available": self.sensevoice is not None,
                 "sensevoice_error": None,
+                "vosk_lgraph_available": self.vosk_lgraph_model_path.is_dir(),
+                "vosk_lgraph_error": None,
+                "final_chain": self.stt_plan.final_chain,
             }
-            if self.sensevoice is not None and utterance_frames:
+            if self.sensevoice is not None and waveform.size:
                 try:
-                    waveform = np.concatenate(utterance_frames)
                     sent_duration = len(waveform) / float(self.samplerate)
                     captured_duration = max(0.0, (last_speech_at or now) - (speech_started_at or now))
                     logging.info(
@@ -1295,18 +1409,40 @@ class STTEngine:
                 except Exception as exc:
                     logging.warning("SenseVoice decode failed; using Vosk result: %s", exc)
                     backend_status["sensevoice_error"] = str(exc)
+            needs_lgraph_candidate = (
+                self.final_mode == "vosk_lgraph"
+                or bool(backend_status["sensevoice_error"])
+                or not is_usable_transcript(sense_text)
+            )
+            if (
+                "vosk_lgraph" in self.stt_plan.final_chain
+                and self.vosk_lgraph_model_path.is_dir()
+                and waveform.size
+                and needs_lgraph_candidate
+            ):
+                try:
+                    lgraph_text = self._transcribe_final_vosk(waveform)
+                    logging.info("Vosk lgraph final candidate: %r", lgraph_text)
+                except Exception as exc:
+                    logging.warning(
+                        "Vosk lgraph final decode failed; using fallback: %s",
+                        exc,
+                    )
+                    backend_status["vosk_lgraph_error"] = str(exc)
             selected = choose_final_transcript(
                 vosk_candidate,
                 sense_text,
                 backend_status,
+                lgraph_candidate=lgraph_text,
             )
             transcript_parts.clear()
             append_transcript_part(selected)
-            selected_raw = (
-                sense_text
-                if backend_status["selected_source"] == "sensevoice"
-                else vosk_candidate
-            )
+            selected_raw = {
+                "sensevoice": sense_text,
+                "vosk_lgraph": lgraph_text,
+                "vosk_small": vosk_candidate,
+                "vosk_fallback": vosk_candidate,
+            }.get(backend_status["selected_source"], "")
             if selected and selected != normalize_transcript(selected_raw):
                 logging.info(
                     "TRANSCRIPT_DEDUPE: before=%r after=%r",

@@ -10,6 +10,9 @@ COMMON_TRANSCRIPT_REPAIRS = {
     "k roast me": "Can you roast me?",
     "can roasted me": "Can you roast me?",
     "can roast me": "Can you roast me?",
+    "can you roasts me": "Can you roast me?",
+    "movinging me something funny": "Tell me something funny.",
+    "boring to me something funny": "Tell me something funny.",
     "a you doing": "What are you doing?",
     "the are you doing": "What are you doing?",
     "are you doing": "What are you doing?",
@@ -46,6 +49,8 @@ def repair_common_transcript(
     joke_context = any(
         word in context for word in {"joke", "funny", "roast", "laugh", "punchline"}
     )
+    if joke_context and cleaned == "tell me up":
+        return "Tell me a joke.", "context_joke_phrase"
     if joke_context and (
         "tell me a longer job" in cleaned or "tell me your longer job" in cleaned
     ):

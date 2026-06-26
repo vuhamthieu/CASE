@@ -23,6 +23,35 @@ class TranscriptSelectionTests(unittest.TestCase):
         self.assertEqual(selected, "tell me more")
         self.assertEqual(status["selected_source"], "vosk_fallback")
 
+    def test_profile_chain_prefers_lgraph_over_small(self):
+        status = {
+            "sensevoice_available": False,
+            "vosk_lgraph_available": True,
+            "final_chain": ("sensevoice", "vosk_lgraph", "vosk_small"),
+        }
+        selected = choose_final_transcript(
+            "tell me up",
+            "",
+            status,
+            lgraph_candidate="tell me a joke",
+        )
+        self.assertEqual(selected, "tell me a joke")
+        self.assertEqual(status["selected_source"], "vosk_lgraph")
+
+    def test_profile_chain_falls_back_to_small_when_lgraph_empty(self):
+        status = {
+            "vosk_lgraph_available": True,
+            "final_chain": ("vosk_lgraph", "vosk_small"),
+        }
+        selected = choose_final_transcript(
+            "tell me something funny",
+            "",
+            status,
+            lgraph_candidate="",
+        )
+        self.assertEqual(selected, "tell me something funny")
+        self.assertEqual(status["selected_source"], "vosk_small")
+
     def test_deduplicates_identical_candidates(self):
         self.assertEqual(
             dedupe_repeated_transcript(

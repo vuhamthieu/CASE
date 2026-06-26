@@ -13,6 +13,9 @@ class TranscriptRepairTests(unittest.TestCase):
             "k roast me": "Can you roast me?",
             "can roasted me": "Can you roast me?",
             "can roast me": "Can you roast me?",
+            "can you roasts me": "Can you roast me?",
+            "movinging me something funny": "Tell me something funny.",
+            "boring to me something funny": "Tell me something funny.",
             "A you doing?": "What are you doing?",
             "The are you doing": "What are you doing?",
             "Are you doing?": "What are you doing?",
@@ -64,6 +67,18 @@ class TranscriptRepairTests(unittest.TestCase):
         )
         self.assertEqual(repaired, "Can you tell me a real longer joke.")
         self.assertEqual(reason, "common_phrase")
+
+    def test_tell_me_up_repairs_only_in_joke_context(self):
+        repaired, reason = repair_common_transcript(
+            "tell me up",
+            recent_context="tell me something funny",
+        )
+        self.assertEqual(repaired, "Tell me a joke.")
+        self.assertEqual(reason, "context_joke_phrase")
+
+        unrepaired, no_reason = repair_common_transcript("tell me up")
+        self.assertEqual(unrepaired, "tell me up")
+        self.assertIsNone(no_reason)
 
 
 if __name__ == "__main__":

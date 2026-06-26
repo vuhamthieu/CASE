@@ -19,7 +19,19 @@ def _words(text: str) -> list[str]:
 
 
 def _is_usable(text: str) -> bool:
-    return bool(_words(text))
+    words = _words(text)
+    if not words:
+        return False
+    alpha_count = sum(ch.isalpha() for ch in text)
+    if alpha_count < 2:
+        return False
+    if len(words) >= 3 and len(set(words)) == 1:
+        return False
+    return True
+
+
+def is_usable_transcript(text: str) -> bool:
+    return _is_usable(text)
 
 
 def dedupe_repeated_transcript(text: str) -> str:
@@ -52,23 +64,51 @@ def choose_final_transcript(
     vosk_candidate: str,
     sensevoice_candidate: str,
     backend_status: dict[str, Any],
+    *,
+    lgraph_candidate: str = "",
 ) -> str:
-    """Choose SenseVoice final text, falling back to Vosk when necessary.
+    """Choose a final transcript in profile order, falling back when necessary.
 
     ``backend_status`` is updated with ``selected_source`` for structured logs.
     """
-    sensevoice_ok = (
-        backend_status.get("sensevoice_available", True)
-        and not backend_status.get("sensevoice_error")
-    )
-    sensevoice_text = dedupe_repeated_transcript(sensevoice_candidate)
-    vosk_text = dedupe_repeated_transcript(vosk_candidate)
+    final_chain = tuple(backend_status.get("final_chain") or ())
+    if not final_chain:
+        sensevoice_ok = (
+            backend_status.get("sensevoice_available", True)
+            and not backend_status.get("sensevoice_error")
+        )
+        sensevoice_text = dedupe_repeated_transcript(sensevoice_candidate)
+        vosk_text = dedupe_repeated_transcript(vosk_candidate)
 
-    if sensevoice_ok and _is_usable(sensevoice_text):
-        backend_status["selected_source"] = "sensevoice"
-        return sensevoice_text
-    if _is_usable(vosk_text):
-        backend_status["selected_source"] = "vosk_fallback"
-        return vosk_text
+        if sensevoice_ok and _is_usable(sensevoice_text):
+            backend_status["selected_source"] = "sensevoice"
+            return sensevoice_text
+        if _is_usable(vosk_text):
+            backend_status["selected_source"] = "vosk_fallback"
+            return vosk_text
+        backend_status["selected_source"] = "none"
+        return ""
+
+    candidates = {
+        "sensevoice": dedupe_repeated_transcript(sensevoice_candidate),
+        "vosk_lgraph": dedupe_repeated_transcript(lgraph_candidate),
+        "vosk_small": dedupe_repeated_transcript(vosk_candidate),
+    }
+    available = {
+        "sensevoice": (
+            backend_status.get("sensevoice_available", True)
+            and not backend_status.get("sensevoice_error")
+        ),
+        "vosk_lgraph": (
+            backend_status.get("vosk_lgraph_available", True)
+            and not backend_status.get("vosk_lgraph_error")
+        ),
+        "vosk_small": True,
+    }
+    for source in final_chain:
+        text = candidates.get(source, "")
+        if available.get(source, False) and _is_usable(text):
+            backend_status["selected_source"] = source
+            return text
     backend_status["selected_source"] = "none"
     return ""
