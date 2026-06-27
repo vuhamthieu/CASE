@@ -282,6 +282,11 @@ FOLLOWUP_MEANINGFUL_PHRASES = {
     "you deal with it",
     "that's on you",
     "thats on you",
+    "you should move out",
+    "yeah you should move out",
+    "you should leave",
+    "then move out",
+    "that sounds like your problem",
 }
 
 FOLLOWUP_MORE_REQUESTS = {
@@ -306,6 +311,20 @@ FOLLOWUP_CORRECTION_STARTERS = {
     "no i mean",
     "actually",
     "wait",
+}
+
+INITIAL_CLEAR_SHORT_COMMANDS = {
+    "tell me",
+    "listen",
+    "stop",
+    "continue",
+    "again",
+    "look",
+    "wake up",
+}
+
+INITIAL_FRAGMENT_PHRASES = {
+    "to hear me",
 }
 
 JOKE_CONTEXT_WORDS = {"joke", "funny", "roast", "laugh", "punchline"}
@@ -970,6 +989,22 @@ class STTEngine:
     def _has_clear_followup_intent(self, cleaned: str) -> bool:
         return self._classify_followup(cleaned) != "unclear_noise"
 
+    def _initial_fragment_unclear(self, cleaned: str) -> bool:
+        if cleaned in INITIAL_CLEAR_SHORT_COMMANDS:
+            return False
+        if cleaned in INITIAL_FRAGMENT_PHRASES:
+            return True
+        words = re.findall(r"\w+", cleaned, flags=re.UNICODE)
+        if len(words) <= 3:
+            if any(cleaned.startswith(pattern.strip()) for pattern in FOLLOWUP_ACCEPT_PATTERNS):
+                return False
+            if words and words[0] in FOLLOWUP_COMMAND_STARTERS:
+                return False
+            if any(word in cleaned for word in {"joke", "roast", "picture", "camera", "vision", "funny"}):
+                return False
+            return True
+        return False
+
     @staticmethod
     def _strip_followup_fillers(cleaned: str) -> str:
         words = cleaned.split()
@@ -994,6 +1029,8 @@ class STTEngine:
         if self._is_end_session_command(cleaned):
             return None
         if CONVERSATION_MODE_ENABLED and self._is_long_conversation_trigger(cleaned):
+            return None
+        if cleaned in INITIAL_CLEAR_SHORT_COMMANDS:
             return None
         word_count = len(re.findall(r"\w+", cleaned, flags=re.UNICODE))
         if word_count < MIN_TRANSCRIPT_WORDS and len(cleaned) > 1:
@@ -1032,6 +1069,9 @@ class STTEngine:
                 return "not_directed"
             return None
 
+        if self._initial_fragment_unclear(cleaned):
+            return "fragment_unclear"
+
         if word_count < MIN_TRANSCRIPT_WORDS:
             return "too_few_words"
 
@@ -1047,7 +1087,11 @@ class STTEngine:
             recent_context=self._last_published_transcript,
         )
         if reason:
-            if reason == "embedded_known_command":
+            if reason in {
+                "embedded_known_command",
+                "phonetic_followup_repair",
+                "banter_phonetic_repair",
+            }:
                 logging.info(
                     "FOLLOWUP_REPAIR: original=%r repaired=%r reason=%s",
                     text,

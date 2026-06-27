@@ -155,6 +155,9 @@ class SttWakeGuardTests(unittest.TestCase):
             "yeah that's your problem",
             "that's your problem",
             "not my problem",
+            "you should move out",
+            "yeah you should move out",
+            "that sounds like your problem",
         ):
             with self.subTest(text=text):
                 self.assertIsNone(engine._transcript_reject_reason(text, followup=True))
@@ -173,6 +176,32 @@ class SttWakeGuardTests(unittest.TestCase):
         )
         self.assertEqual(repaired, "can you tell me something funny")
         self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+
+    def test_phonetic_task_followups_repair_and_accept(self):
+        engine = make_engine()
+        cases = {
+            "which tusk do require you": "which task do you require",
+            "which task do require you": "which task do you require",
+            "what task do require you": "what task do you require",
+        }
+        for transcript, expected in cases.items():
+            with self.subTest(transcript=transcript):
+                repaired = engine._repair_transcript(transcript)
+                self.assertEqual(repaired, expected)
+                self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+
+    def test_banter_phonetic_followup_repairs_and_accepts(self):
+        engine = make_engine()
+        repaired = engine._repair_transcript("the here you should move out")
+        self.assertEqual(repaired, "yeah you should move out")
+        self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+
+    def test_initial_unclear_fragment_rejected_but_short_commands_allowed(self):
+        engine = make_engine()
+        self.assertEqual(engine._transcript_reject_reason("to hear me"), "fragment_unclear")
+        for text in ("tell me", "listen", "continue", "again", "look", "wake up"):
+            with self.subTest(text=text):
+                self.assertIsNone(engine._transcript_reject_reason(text))
 
     def test_wake_echo_and_empty_followups_are_rejected(self):
         engine = make_engine()

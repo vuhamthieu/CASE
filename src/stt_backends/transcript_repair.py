@@ -43,6 +43,16 @@ FOLLOWUP_PHRASE_REPAIRS = {
     "more funny": "tell me something funnier",
 }
 
+PHONETIC_FOLLOWUP_REPAIRS = {
+    "which tusk do require you": "which task do you require",
+    "which task do require you": "which task do you require",
+    "what task do require you": "what task do you require",
+}
+
+BANTER_PHONETIC_REPAIRS = {
+    "the here you should move out": "yeah you should move out",
+}
+
 MALFORMED_UNREPAIRED_PREFIXES = (
     "k ",
 )
@@ -65,6 +75,20 @@ def repair_common_transcript(
     repaired = FOLLOWUP_PHRASE_REPAIRS.get(cleaned)
     if repaired:
         return repaired, "followup_phrase"
+    repaired = PHONETIC_FOLLOWUP_REPAIRS.get(cleaned)
+    if repaired:
+        return repaired, "phonetic_followup_repair"
+    repaired = BANTER_PHONETIC_REPAIRS.get(cleaned)
+    if repaired:
+        return repaired, "banter_phonetic_repair"
+    if "tusk" in cleaned or "do require you" in cleaned:
+        repaired_text = re.sub(r"\btusk\b", "task", cleaned)
+        repaired_text = re.sub(r"\bdo require you\b", "do you require", repaired_text)
+        if repaired_text != cleaned and (
+            repaired_text.startswith("which task ")
+            or repaired_text.startswith("what task ")
+        ):
+            return repaired_text, "phonetic_followup_repair"
     for phrase, replacement in EMBEDDED_FOLLOWUP_COMMAND_REPAIRS.items():
         if cleaned == phrase:
             return replacement, "embedded_known_command"

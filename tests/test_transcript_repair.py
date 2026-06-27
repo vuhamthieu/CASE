@@ -105,6 +105,23 @@ class TranscriptRepairTests(unittest.TestCase):
                 self.assertEqual(repaired, expected)
                 self.assertIn(reason, {"embedded_known_command", "followup_phrase"})
 
+    def test_phonetic_task_question_repairs(self):
+        cases = {
+            "which tusk do require you": "which task do you require",
+            "which task do require you": "which task do you require",
+            "what task do require you": "what task do you require",
+        }
+        for transcript, expected in cases.items():
+            with self.subTest(transcript=transcript):
+                repaired, reason = repair_common_transcript(transcript)
+                self.assertEqual(repaired, expected)
+                self.assertEqual(reason, "phonetic_followup_repair")
+
+    def test_banter_phonetic_repair(self):
+        repaired, reason = repair_common_transcript("the here you should move out")
+        self.assertEqual(repaired, "yeah you should move out")
+        self.assertEqual(reason, "banter_phonetic_repair")
+
 
 if __name__ == "__main__":
     unittest.main()
