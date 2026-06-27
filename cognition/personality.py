@@ -50,6 +50,10 @@ from src.realtime.realtime_config import (
     CASE_TTS_REALTIME_MAX_CHARS,
     CASE_TTS_REALTIME_TRUNCATE_EXTRA,
     CASE_TTS_REALTIME_WAIT_FOR_SENTENCE_END,
+    CASE_ENABLE_THINKING_FILLER,
+    CASE_THINKING_FILLER_AFTER_SEC,
+    CASE_THINKING_FILLER_MAX_PER_TURN,
+    CASE_THINKING_FILLER_SIMPLE_AFTER_SEC,
     CASE_HONESTY_PERCENT,
     CASE_HUMOR_PERCENT,
     CASE_SARCASM_LEVEL,
@@ -110,6 +114,17 @@ ENABLE_STREAMING_LLM = True
 STREAMING_LLM_FALLBACK_TO_FULL_RESPONSE = True
 ENABLE_THINKING_ACK = False
 THINKING_ACK_TEXT = "Hmm, let me think."
+SIMPLE_THINKING_FILLER_PROMPTS = {
+    "hello",
+    "hi",
+    "hey",
+    "how are you",
+    "what are you doing",
+    "stop",
+    "again",
+    "continue",
+    "tell me a joke",
+}
 
 FIRST_TTS_CHUNK_MAX_CHARS = 55
 FIRST_TTS_CHUNK_MAX_WORDS = 8
@@ -320,6 +335,7 @@ class CASEPersonality:
         self._turn_numbers = count(1)
         self._turn_lock = asyncio.Lock()
         self._thinking_ack_done = asyncio.Event()
+        self._thinking_filler_tasks: dict[int, asyncio.Task] = {}
         self.realtime_hybrid = realtime_hybrid
 
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -450,6 +466,7 @@ class CASEPersonality:
             "transcript_final_at",
             metrics["transcript_final_at"],
         )
+        self._schedule_thinking_filler(turn_id, user_text, metrics)
         chunker = self._new_stream_chunker(metrics)
         extractor = DialogueJsonExtractor()
         raw_response = ""
@@ -625,6 +642,7 @@ class CASEPersonality:
                     "AI_SPEAK_STREAM_END",
                     {"turn_id": turn_id, "metrics": metrics},
                 )
+            self._discard_thinking_filler_task(turn_id)
 
             if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
@@ -696,6 +714,7 @@ class CASEPersonality:
                     "AI_SPEAK_STREAM_END",
                     {"turn_id": turn_id, "metrics": metrics},
                 )
+            self._discard_thinking_filler_task(turn_id)
             if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
             return True
@@ -817,6 +836,7 @@ class CASEPersonality:
         queued_at = time.monotonic()
         if "first_chunk_ready_at" not in metrics:
             metrics["first_chunk_ready_at"] = queued_at
+            self._cancel_thinking_filler(turn_id, metrics, "first_chunk_ready")
         if "text_ready_at" not in metrics:
             metrics["text_ready_at"] = queued_at
             metrics["tts_text_ready_seconds"] = (
@@ -853,6 +873,90 @@ class CASEPersonality:
                 "metrics": metrics,
             },
         )
+
+    def _schedule_thinking_filler(
+        self,
+        turn_id: int,
+        user_text: str,
+        metrics: dict,
+    ) -> None:
+        if not CASE_ENABLE_THINKING_FILLER:
+            return
+        if int(CASE_THINKING_FILLER_MAX_PER_TURN) <= 0:
+            return
+
+        simple_prompt = self._is_simple_thinking_filler_prompt(user_text)
+        delay = (
+            CASE_THINKING_FILLER_SIMPLE_AFTER_SEC
+            if simple_prompt
+            else CASE_THINKING_FILLER_AFTER_SEC
+        )
+        logger.info(
+            "THINKING_FILLER_SCHEDULED: turn=%s delay=%.3f simple_prompt=%s",
+            turn_id,
+            delay,
+            simple_prompt,
+        )
+        if not hasattr(self, "_thinking_filler_tasks"):
+            self._thinking_filler_tasks = {}
+        self._discard_thinking_filler_task(turn_id)
+        task = asyncio.create_task(
+            self._maybe_play_thinking_filler(turn_id, delay, simple_prompt, metrics)
+        )
+        self._thinking_filler_tasks[turn_id] = task
+
+    async def _maybe_play_thinking_filler(
+        self,
+        turn_id: int,
+        delay: float,
+        simple_prompt: bool,
+        metrics: dict,
+    ) -> None:
+        try:
+            await asyncio.sleep(max(0.0, delay))
+            if metrics.get("first_chunk_ready_at") or metrics.get("first_tts_chunk_start_at"):
+                logger.info("THINKING_FILLER_SKIP: reason=first_chunk_ready")
+                return
+            if metrics.get("first_audio_play_start_at") or metrics.get("chunks_played"):
+                logger.info("THINKING_FILLER_SKIP: reason=audio_active")
+                return
+            played = int(metrics.get("thinking_filler_played", 0))
+            if played >= int(CASE_THINKING_FILLER_MAX_PER_TURN):
+                logger.info("THINKING_FILLER_SKIP: reason=max_per_turn")
+                return
+
+            metrics["thinking_filler_played"] = played + 1
+            await self._publish_and_yield(
+                "THINKING_FILLER_PLAY",
+                {
+                    "turn_id": turn_id,
+                    "simple_prompt": simple_prompt,
+                    "metrics": metrics,
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._thinking_filler_tasks.pop(turn_id, None)
+
+    def _cancel_thinking_filler(self, turn_id: int, metrics: dict, reason: str) -> None:
+        task = getattr(self, "_thinking_filler_tasks", {}).get(turn_id)
+        if task is None or task.done():
+            return
+        metrics["thinking_filler_cancelled_reason"] = reason
+        logger.info("THINKING_FILLER_CANCELLED: turn=%s reason=%s", turn_id, reason)
+        task.cancel()
+
+    def _discard_thinking_filler_task(self, turn_id: int) -> None:
+        task = getattr(self, "_thinking_filler_tasks", {}).pop(turn_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    @staticmethod
+    def _is_simple_thinking_filler_prompt(text: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9'\s]+", " ", str(text).lower())
+        normalized = " ".join(normalized.split())
+        return normalized in SIMPLE_THINKING_FILLER_PROMPTS
 
     @staticmethod
     def _split_first_chunk_after_safe_text(text: str) -> list[str]:

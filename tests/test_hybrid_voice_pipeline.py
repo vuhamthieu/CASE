@@ -1,6 +1,8 @@
 import unittest
 import asyncio
 import time
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +30,7 @@ from src.voice_pipeline.wake_ack import (
     WakeAcknowledgementSelector,
     pad_audio_to_minimum,
 )
+from src.voice_pipeline.thinking_filler import ThinkingFillerSelector
 from scripts.generate_wake_ack_wavs import (
     CLEAR_SHORT_WAKE_ACK_STYLE,
     LEADING_SILENCE_MS,
@@ -394,6 +397,157 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         spoken = " ".join(chunk["text"] for chunk in chunks)
         self.assertIn("I told my CPU to take a break", spoken)
         self.assertIn("reported me", spoken)
+
+    async def test_fast_response_cancels_thinking_filler(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {
+            "realtime_hybrid": True,
+            "allow_long_answer": False,
+            "max_spoken_chars": 420,
+            "max_tts_chunks": 4,
+            "user_text": "how are you",
+        }
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
+            0.05,
+        ):
+            personality._schedule_thinking_filler(11, "how are you", metrics)
+            await personality._queue_stream_chunk(11, 0, "Fine. Suspiciously.", metrics)
+            await asyncio.sleep(0.06)
+
+        topics = [topic for topic, _payload in bus.events]
+        self.assertNotIn("THINKING_FILLER_PLAY", topics)
+        self.assertEqual(metrics["thinking_filler_cancelled_reason"], "first_chunk_ready")
+
+    async def test_slow_response_schedules_one_thinking_filler(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {}
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+            0.01,
+        ), patch("cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
+            personality._schedule_thinking_filler(
+                12,
+                "explain what you are doing",
+                metrics,
+            )
+            await asyncio.sleep(0.04)
+
+        events = [event for event in bus.events if event[0] == "THINKING_FILLER_PLAY"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1]["turn_id"], 12)
+        self.assertEqual(metrics["thinking_filler_played"], 1)
+
+    async def test_simple_prompt_uses_longer_thinking_filler_delay(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {}
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+            0.01,
+        ), patch(
+            "cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
+            0.05,
+        ):
+            personality._schedule_thinking_filler(13, "how are you", metrics)
+            await asyncio.sleep(0.02)
+            self.assertNotIn(
+                "THINKING_FILLER_PLAY",
+                [topic for topic, _payload in bus.events],
+            )
+            await asyncio.sleep(0.05)
+
+        events = [event for event in bus.events if event[0] == "THINKING_FILLER_PLAY"]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0][1]["simple_prompt"])
+
+    async def test_thinking_filler_max_one_per_turn(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {"thinking_filler_played": 1}
+
+        with patch("cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
+            await personality._maybe_play_thinking_filler(
+                14,
+                0.0,
+                False,
+                metrics,
+            )
+
+        self.assertNotIn(
+            "THINKING_FILLER_PLAY",
+            [topic for topic, _payload in bus.events],
+        )
+
+    async def test_thinking_filler_missing_assets_skips_without_tts_events(self):
+        bus = FakeBus()
+        voice = CASEVoice.__new__(CASEVoice)
+        voice.bus = bus
+        voice._answer_audio_active = False
+        with tempfile.TemporaryDirectory() as tmp:
+            voice._thinking_filler_selector = ThinkingFillerSelector(
+                tmp,
+                ["one_sec"],
+                ["one_sec"],
+            )
+            with self.assertLogs("actuation.audio_output.tts_engine", level="INFO") as logs:
+                await voice.handle_thinking_filler({"turn_id": 15})
+
+        self.assertTrue(
+            any("THINKING_FILLER_SKIP: reason=no_assets" in line for line in logs.output)
+        )
+        self.assertEqual(bus.events, [])
+
+    async def test_thinking_filler_does_not_emit_tts_state_events(self):
+        bus = FakeBus()
+        voice = CASEVoice.__new__(CASEVoice)
+        voice.bus = bus
+        voice._answer_audio_active = False
+        voice._playback_executor = ThreadPoolExecutor(max_workers=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                path = Path(tmp) / "one_sec.wav"
+                path.write_bytes(b"placeholder")
+                voice._thinking_filler_selector = ThinkingFillerSelector(
+                    tmp,
+                    ["one_sec"],
+                    ["one_sec"],
+                )
+                with patch(
+                    "actuation.audio_output.tts_engine.play_thinking_filler_wav",
+                    return_value={"duration_out": 0.3},
+                ):
+                    await voice.handle_thinking_filler({"turn_id": 16})
+            finally:
+                voice._playback_executor.shutdown(wait=True)
+
+        topics = [topic for topic, _payload in bus.events]
+        self.assertNotIn("TTS_START", topics)
+        self.assertNotIn("TTS_END", topics)
+
+    async def test_thinking_filler_skips_when_answer_audio_active(self):
+        bus = FakeBus()
+        voice = CASEVoice.__new__(CASEVoice)
+        voice.bus = bus
+        voice._answer_audio_active = True
+        with self.assertLogs("actuation.audio_output.tts_engine", level="INFO") as logs:
+            await voice.handle_thinking_filler({"turn_id": 17})
+        self.assertTrue(
+            any("THINKING_FILLER_SKIP: reason=audio_active" in line for line in logs.output)
+        )
 
     def test_generated_ack_has_silence_padding_and_fades(self):
         raw = np.full(SAMPLE_RATE // 5, 12_000, dtype=np.int16)

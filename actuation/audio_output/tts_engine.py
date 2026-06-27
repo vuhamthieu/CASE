@@ -32,12 +32,19 @@ from src.realtime.realtime_config import (
     CASE_TTS_REALTIME_MAX_CHUNKS,
     CASE_TTS_PLAYBACK_CONCURRENCY,
     CASE_TTS_SYNTH_CONCURRENCY,
+    CASE_THINKING_FILLER_DIR,
+    CASE_THINKING_FILLER_KEYS,
+    CASE_THINKING_FILLER_PREFERRED_KEYS,
     PIPER_CONFIG_PATH,
     PIPER_LENGTH_SCALE,
     PIPER_MODEL_PATH,
     PIPER_NOISE_SCALE,
     PIPER_NOISE_W,
     VOICE_OUTPUT_BACKEND,
+)
+from src.voice_pipeline.thinking_filler import (
+    ThinkingFillerSelector,
+    play_thinking_filler_wav,
 )
 
 
@@ -115,6 +122,12 @@ class CASEVoice:
         )
         self._stream_pending_starts: dict[int, dict] = {}
         self._stream_started_turns: set[int] = set()
+        self._answer_audio_active = False
+        self._thinking_filler_selector = ThinkingFillerSelector(
+            CASE_THINKING_FILLER_DIR,
+            CASE_THINKING_FILLER_KEYS,
+            CASE_THINKING_FILLER_PREFERRED_KEYS,
+        )
         self.playback_manager = get_playback_manager()
         self._playback_backend = self.playback_manager.backend
 
@@ -122,6 +135,7 @@ class CASEVoice:
         self.bus.subscribe("AI_SPEAK_STREAM_START", self.handle_stream_start)
         self.bus.subscribe("AI_SPEAK_STREAM_CHUNK", self.handle_stream_chunk)
         self.bus.subscribe("AI_SPEAK_STREAM_END", self.handle_stream_end)
+        self.bus.subscribe("THINKING_FILLER_PLAY", self.handle_thinking_filler)
 
     def _ensure_workers(self) -> None:
         if self.tts_text_queue is None:
@@ -271,6 +285,49 @@ class CASEVoice:
         )
         self._stream_started_turns.discard(turn_id)
 
+    async def handle_thinking_filler(self, payload: dict) -> None:
+        """Play a cached thinking filler without emitting normal TTS state events."""
+        if bool(getattr(self, "_answer_audio_active", False)):
+            logger.info("THINKING_FILLER_SKIP: reason=audio_active")
+            return
+
+        selector = getattr(self, "_thinking_filler_selector", None)
+        if selector is None:
+            selector = ThinkingFillerSelector(
+                CASE_THINKING_FILLER_DIR,
+                CASE_THINKING_FILLER_KEYS,
+                CASE_THINKING_FILLER_PREFERRED_KEYS,
+            )
+            self._thinking_filler_selector = selector
+
+        selected = selector.choose()
+        if selected is None:
+            logger.info("THINKING_FILLER_SKIP: reason=no_assets")
+            return
+
+        turn_id = int(payload.get("turn_id", 0) or 0)
+        key, path = selected
+        logger.info("THINKING_FILLER_PLAY: turn=%s key=%s path=%s", turn_id, key, path)
+        started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                self._playback_executor,
+                play_thinking_filler_wav,
+                path,
+            )
+            logger.info(
+                "THINKING_FILLER_DONE: turn=%s key=%s duration=%.3fs",
+                turn_id,
+                key,
+                time.monotonic() - started,
+            )
+        except Exception as exc:
+            logger.warning(
+                "THINKING_FILLER_SKIP: reason=playback_failed error=%s",
+                exc,
+            )
+
     async def _synthesis_worker(self) -> None:
         assert self.tts_text_queue is not None
         assert self.audio_playback_queue is not None
@@ -386,24 +443,28 @@ class CASEVoice:
                     if CASE_CONSOLE_MODE != "clean":
                         print(f"\033[96m[CASE]: {item['text']}\033[0m")
                     loop = asyncio.get_running_loop()
-                    if kind == "audio":
-                        await loop.run_in_executor(
-                            self._playback_executor,
-                            self._play_raw_audio,
-                            item["audio"],
-                            item["sample_rate"],
-                        )
-                    else:
-                        logger.warning(
-                            "Playing TTS chunk through direct fallback: turn=%s seq=%s",
-                            item["turn_id"],
-                            item["sequence"],
-                        )
-                        await loop.run_in_executor(
-                            self._playback_executor,
-                            self._run_direct_pipeline,
-                            item["text"],
-                        )
+                    self._answer_audio_active = True
+                    try:
+                        if kind == "audio":
+                            await loop.run_in_executor(
+                                self._playback_executor,
+                                self._play_raw_audio,
+                                item["audio"],
+                                item["sample_rate"],
+                            )
+                        else:
+                            logger.warning(
+                                "Playing TTS chunk through direct fallback: turn=%s seq=%s",
+                                item["turn_id"],
+                                item["sequence"],
+                            )
+                            await loop.run_in_executor(
+                                self._playback_executor,
+                                self._run_direct_pipeline,
+                                item["text"],
+                            )
+                    finally:
+                        self._answer_audio_active = False
 
                     item["playback_done_at"] = time.monotonic()
                     self._log_chunk_latency(item)
