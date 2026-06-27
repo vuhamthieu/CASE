@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
 
+
+logger = logging.getLogger(__name__)
 
 WEAK_TRAILING_WORDS = {
     "the",
@@ -39,12 +42,27 @@ DEPENDENT_START_WORDS = {
     "until",
 }
 
+COMPLETE_SHORT_REPLIES = {
+    "yes.",
+    "no.",
+    "sure.",
+    "ok.",
+    "okay.",
+    "i'm here.",
+}
+
 
 @dataclass(frozen=True)
 class ResponseChunkerConfig:
     min_chars: int = 35
     max_chars: int = 110
     absolute_max_chars: int = 160
+    first_chunk_target_chars: int = 40
+    first_chunk_max_chars: int = 55
+    normal_chunk_target_chars: int = 80
+    normal_chunk_max_chars: int = 110
+    flush_first_on_soft_punctuation: bool = True
+    min_first_chunk_chars: int = 16
     max_chunks: int = 4
     max_total_chars: int = 360
     prefer_sentence_boundary: bool = True
@@ -62,6 +80,12 @@ class ResponseChunker:
         min_chars: int = 35,
         max_chars: int = 110,
         absolute_max_chars: int = 160,
+        first_chunk_target_chars: int = 40,
+        first_chunk_max_chars: int = 55,
+        normal_chunk_target_chars: int = 80,
+        normal_chunk_max_chars: int = 110,
+        flush_first_on_soft_punctuation: bool = True,
+        min_first_chunk_chars: int = 16,
         max_chunks: int = 4,
         max_total_chars: int = 360,
         prefer_sentence_boundary: bool = True,
@@ -73,6 +97,12 @@ class ResponseChunker:
             min_chars=max(1, int(min_chars)),
             max_chars=max(1, int(max_chars)),
             absolute_max_chars=max(1, int(absolute_max_chars)),
+            first_chunk_target_chars=max(1, int(first_chunk_target_chars)),
+            first_chunk_max_chars=max(1, int(first_chunk_max_chars)),
+            normal_chunk_target_chars=max(1, int(normal_chunk_target_chars)),
+            normal_chunk_max_chars=max(1, int(normal_chunk_max_chars)),
+            flush_first_on_soft_punctuation=bool(flush_first_on_soft_punctuation),
+            min_first_chunk_chars=max(1, int(min_first_chunk_chars)),
             max_chunks=max(1, int(max_chunks)),
             max_total_chars=max(1, int(max_total_chars)),
             prefer_sentence_boundary=bool(prefer_sentence_boundary),
@@ -83,6 +113,7 @@ class ResponseChunker:
         self.buffer = ""
         self.emitted_count = 0
         self.emitted_chars = 0
+        self._last_split_reason = ""
 
     @property
     def exhausted(self) -> bool:
@@ -138,6 +169,12 @@ class ResponseChunker:
             candidate = self._fit_total_budget(candidate)
             if not candidate:
                 break
+            if self.emitted_count == 0 and self._last_split_reason:
+                logger.info(
+                    "RESPONSE_FIRST_CHUNK_FLUSH: reason=%s chars=%s",
+                    self._last_split_reason,
+                    len(candidate),
+                )
             chunks.append(candidate)
             self.emitted_count += 1
             self.emitted_chars += len(candidate)
@@ -151,22 +188,73 @@ class ResponseChunker:
         if not self.buffer.strip():
             return None
 
+        self._last_split_reason = ""
+        if (
+            not final
+            and
+            self.emitted_count == 0
+            and self.config.flush_first_on_soft_punctuation
+        ):
+            first_split = self._first_chunk_split()
+            if first_split is not None:
+                return first_split
+
         sentence = self._sentence_split()
         if sentence is not None:
+            self._last_split_reason = "sentence_boundary"
             return sentence
 
         soft = self._soft_punctuation_split()
         if soft is not None:
+            self._last_split_reason = "soft_punctuation"
             return soft
 
         length = self._length_split()
         if length is not None:
+            self._last_split_reason = "length"
             return length
 
         if final:
             cleaned = self._clean(self.buffer)
             if cleaned and cleaned.lower() not in {"i", "the", "a", "an"}:
+                self._last_split_reason = "final_flush"
                 return len(self.buffer)
+        return None
+
+    def _first_chunk_split(self) -> Optional[int]:
+        hard_limit = min(
+            self.config.first_chunk_max_chars,
+            self.config.absolute_max_chars,
+        )
+        for match in re.finditer(r"[.!?;:,](?=\s|$)", self.buffer):
+            split_at = match.end()
+            candidate = self._clean(self.buffer[:split_at])
+            if not candidate:
+                continue
+            if len(candidate) > hard_limit:
+                break
+            if (
+                len(candidate) < self.config.min_first_chunk_chars
+                and not self._is_complete_short_reply(candidate)
+            ):
+                continue
+            if match.group(0) in ",;:":
+                if (
+                    match.group(0) == ","
+                    and len(candidate) < self.config.first_chunk_target_chars
+                ):
+                    continue
+                if self._ends_with_weak_word(candidate):
+                    continue
+                if self._next_starts_dependent(split_at):
+                    continue
+            self._last_split_reason = (
+                "soft_punctuation"
+                if match.group(0) in ",;:"
+                else "sentence_boundary"
+            )
+            return split_at
+
         return None
 
     def _sentence_split(self) -> Optional[int]:
@@ -200,7 +288,12 @@ class ResponseChunker:
         return chosen if self.exhausted else None
 
     def _soft_punctuation_split(self) -> Optional[int]:
-        if len(self.buffer) < self.config.max_chars:
+        threshold = (
+            self.config.first_chunk_target_chars
+            if self.emitted_count == 0
+            else self.config.normal_chunk_target_chars
+        )
+        if len(self.buffer) < threshold:
             return None
         if self._buffer_is_complete_short_response():
             return None
@@ -219,12 +312,26 @@ class ResponseChunker:
         return None
 
     def _length_split(self) -> Optional[int]:
-        if len(self.buffer) < self.config.absolute_max_chars:
+        active_max = (
+            self.config.absolute_max_chars
+            if self.emitted_count == 0
+            else self.config.normal_chunk_max_chars
+        )
+        if len(self.buffer) < active_max:
             return None
         if self._buffer_is_complete_short_response():
             return None
 
-        limit = self.config.absolute_max_chars
+        limit = min(active_max, self.config.absolute_max_chars)
+        split_at = self._word_split_before(limit)
+        if split_at is not None:
+            return split_at
+
+        if len(self.buffer) >= self.config.absolute_max_chars:
+            return self.config.absolute_max_chars
+        return None
+
+    def _word_split_before(self, limit: int) -> Optional[int]:
         for match in reversed(list(re.finditer(r"\s+", self.buffer[: limit + 1]))):
             split_at = match.start()
             if split_at < self.config.min_chars:
@@ -236,9 +343,6 @@ class ResponseChunker:
                 and not self._next_starts_dependent(split_at)
             ):
                 return split_at
-
-        if len(self.buffer) >= self.config.absolute_max_chars:
-            return self.config.absolute_max_chars
         return None
 
     def _fit_total_budget(self, text: str) -> str:
@@ -300,6 +404,10 @@ class ResponseChunker:
             and len(self._clean(self.buffer)) <= self.config.single_chunk_under_chars
             and bool(re.search(r"[.!?](?=\s|$)", self.buffer))
         )
+
+    @staticmethod
+    def _is_complete_short_reply(text: str) -> bool:
+        return text.strip().lower() in COMPLETE_SHORT_REPLIES
 
     @staticmethod
     def _clean(text: str) -> str:

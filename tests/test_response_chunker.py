@@ -118,9 +118,10 @@ class ResponseChunkerTests(unittest.TestCase):
         )
         chunks.extend(chunker.flush())
         self.assertEqual(
-            chunks,
-            ["I am not a boy. I am hardware with standards. Try again."],
+            normalized(" ".join(chunks)),
+            "I am not a boy. I am hardware with standards. Try again.",
         )
+        self.assertLessEqual(len(chunks[0]), 55)
 
     def test_tiny_final_chunk_merges_with_previous_when_short(self):
         chunker = ResponseChunker(
@@ -136,8 +137,8 @@ class ResponseChunkerTests(unittest.TestCase):
         )
         chunks.extend(chunker.flush())
         self.assertEqual(
-            chunks,
-            ["This is a short correction with one last tiny sentence. Try again."],
+            normalized(" ".join(chunks)),
+            "This is a short correction with one last tiny sentence. Try again.",
         )
 
     def test_joke_setup_punchline_can_remain_two_chunks(self):
@@ -221,6 +222,69 @@ class ResponseChunkerTests(unittest.TestCase):
         chunks.extend(chunker.feed("labor."))
         chunks.extend(chunker.flush())
         self.assertEqual(normalized(" ".join(chunks)), normalized(full))
+
+    def test_first_chunk_flushes_early_on_soft_punctuation(self):
+        text = (
+            "I told my CPU to take a break; it opened task manager and filed "
+            "a complaint. Don't ask me how it types."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=110,
+            absolute_max_chars=160,
+            max_chunks=4,
+            max_total_chars=260,
+            first_chunk_target_chars=40,
+            first_chunk_max_chars=55,
+            normal_chunk_target_chars=80,
+            normal_chunk_max_chars=110,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertEqual(chunks[0], "I told my CPU to take a break;")
+        self.assertLessEqual(len(chunks[0]), 55)
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_first_chunk_avoids_too_short_comma_fragment(self):
+        text = (
+            "I'm CASE. I handle speech, vision, and hardware control. "
+            "Basically, a field robot with questionable job security."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=90,
+            max_chunks=4,
+            max_total_chars=360,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertNotEqual(chunks[0], "I'm CASE. I handle speech,")
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_normal_chunks_stay_under_normal_max_when_possible(self):
+        text = (
+            "I opened the diagnostic panel and found three warnings. "
+            "One was useful, one was decorative, and one was probably you. "
+            "I filed all three under progress."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=110,
+            absolute_max_chars=160,
+            max_chunks=4,
+            max_total_chars=320,
+            first_chunk_target_chars=40,
+            first_chunk_max_chars=55,
+            normal_chunk_target_chars=80,
+            normal_chunk_max_chars=110,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertTrue(chunks)
+        self.assertLessEqual(len(chunks[0]), 55)
+        for chunk in chunks[1:]:
+            self.assertLessEqual(len(chunk), 110)
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
 
 
 if __name__ == "__main__":

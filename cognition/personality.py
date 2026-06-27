@@ -24,10 +24,15 @@ from src.realtime.realtime_config import (
     CASE_STREAM_FULL_RESPONSE,
     CASE_TTS_ALLOW_MULTI_CHUNK,
     CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+    CASE_TTS_FIRST_CHUNK_MAX_CHARS,
+    CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
+    CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
     CASE_TTS_CHUNK_MAX_CHARS,
     CASE_TTS_CHUNK_MIN_CHARS,
     CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
     CASE_TTS_MERGE_TINY_CHUNKS,
+    CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
+    CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
     CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
@@ -47,6 +52,9 @@ from src.realtime.realtime_config import (
     CASE_SARCASM_LEVEL,
     CASE_STYLE_SHORT_REPLIES,
     CASE_VOICE_PRESET,
+    CASE_VOICE_JOKE_MAX_SENTENCES,
+    CASE_VOICE_REPLY_MAX_SENTENCES,
+    CASE_VOICE_REPLY_STYLE,
     LLM_FIRST_TOKEN_BUDGET_SEC,
     LLM_HARD_TIMEOUT_SEC,
 )
@@ -331,11 +339,13 @@ class CASEPersonality:
             sarcasm_level=CASE_SARCASM_LEVEL,
         )
         realtime_style = (
+            f"Voice style is {CASE_VOICE_REPLY_STYLE}: use 1-2 short spoken sentences. "
             f"Default to {CASE_REALTIME_TARGET_SENTENCES} short sentences when useful. "
-            f"Never exceed {CASE_REALTIME_MAX_SENTENCES} sentences or "
+            f"Never exceed {CASE_VOICE_REPLY_MAX_SENTENCES} sentences or "
             f"{CASE_RESPONSE_MAX_TOTAL_CHARS} spoken characters unless the user explicitly "
-            "asks for detail, a story, or an explanation. Use 2-4 short sentences when "
-            "that makes the answer clearer. Keep jokes and roasts short, harmless, and "
+            "asks for detail, a story, or an explanation. Prefer short punchy replies. "
+            f"For jokes, use at most {CASE_VOICE_JOKE_MAX_SENTENCES} short sentences: "
+            "one short setup and one short punchline. Keep jokes and roasts short, harmless, and "
             "dry. CASE is calm, useful, and lightly sarcastic like a field robot "
             "companion. Use deadpan wording, not long explanations. Avoid stiff phrases "
             "like protocols, optimal, efficiency, local sensors, versatile support unit, "
@@ -443,6 +453,11 @@ class CASEPersonality:
             min_chars=CASE_TTS_CHUNK_MIN_CHARS,
             max_chars=CASE_TTS_CHUNK_MAX_CHARS,
             absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+            first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
+            first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
+            normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
+            normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
+            flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
             max_chunks=int(metrics["max_tts_chunks"]),
             max_total_chars=int(metrics["max_spoken_chars"]),
             prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
@@ -457,6 +472,13 @@ class CASEPersonality:
         first_token_budget_logged = False
 
         metrics["llm_stream_start_at"] = time.monotonic()
+        logger.info(
+            "RESPONSE_CHUNK_POLICY: first_target=%s first_max=%s normal_target=%s normal_max=%s",
+            CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
+            CASE_TTS_FIRST_CHUNK_MAX_CHARS,
+            CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
+            CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
+        )
         logger.info("LLM_MODE: plain_text_stream tools_enabled=False")
         if self.realtime_hybrid:
             logger.info("LLM_REQUEST_TOOLS: count=0 tools_enabled=False")
@@ -620,6 +642,11 @@ class CASEPersonality:
                         min_chars=CASE_TTS_CHUNK_MIN_CHARS,
                         max_chars=CASE_TTS_CHUNK_MAX_CHARS,
                         absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+                        first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
+                        first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
+                        normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
+                        normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
+                        flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
                         max_chunks=int(metrics["max_tts_chunks"]),
                         max_total_chars=int(metrics["max_spoken_chars"]),
                         prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,

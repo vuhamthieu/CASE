@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from src.memory.session_memory import MemoryContext
+from src.config import defaults
 
 from .persona_profile import CASE_IDENTITY, CASE_PERSONALITY_RULES
 from .style_rules import BANNED_STALE_JOKES, JOKE_STYLE_RULES, NORMAL_STYLE_RULES
@@ -46,6 +47,13 @@ class CasePromptBuilder:
 
         sections = [
             "CASE persona:\n" + "\n".join(rules),
+            (
+                "Voice response style:\n"
+                f"- style={defaults.CASE_VOICE_REPLY_STYLE}\n"
+                f"- use 1-{defaults.CASE_VOICE_REPLY_MAX_SENTENCES} short spoken sentences by default\n"
+                f"- jokes use at most {defaults.CASE_VOICE_JOKE_MAX_SENTENCES} short sentences\n"
+                "- avoid paragraph-length answers unless the user asks for detail"
+            ),
             "Recent conversation:\n" + ("\n".join(turn_lines) if turn_lines else "- none"),
             "Recent jokes/roasts to avoid:\n"
             + ("\n".join(avoid_lines) if avoid_lines else "- none"),
