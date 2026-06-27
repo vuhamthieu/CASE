@@ -196,6 +196,22 @@ GARBAGE_WORDS = {
     "okay",
 }
 
+LOW_CONTENT_WORDS = GARBAGE_WORDS | {
+    "yeah",
+    "yea",
+    "yes",
+    "ok",
+    "well",
+    "so",
+    "it",
+    "its",
+    "it's",
+    "that",
+    "thats",
+    "that's",
+    "this",
+}
+
 FOLLOWUP_COMMAND_STARTERS = {
     "what",
     "who",
@@ -984,10 +1000,26 @@ class STTEngine:
             return "clear_followup_question"
         if any(word in normalized for word in {"joke", "roast", "picture", "camera", "vision", "funny"}):
             return "clear_followup_command"
+        if self._is_conversational_followup(normalized):
+            return "conversational_followup"
         return "unclear_noise"
 
     def _has_clear_followup_intent(self, cleaned: str) -> bool:
         return self._classify_followup(cleaned) != "unclear_noise"
+
+    @staticmethod
+    def _is_conversational_followup(cleaned: str) -> bool:
+        words = re.findall(r"\w+(?:'\w+)?", cleaned, flags=re.UNICODE)
+        if not words:
+            return False
+        content_words = [
+            word
+            for word in words
+            if len(word) >= 3 and word.lower() not in LOW_CONTENT_WORDS
+        ]
+        if not content_words:
+            return False
+        return len(words) >= 4 or len(cleaned) >= 18
 
     def _initial_fragment_unclear(self, cleaned: str) -> bool:
         if cleaned in INITIAL_CLEAR_SHORT_COMMANDS:
@@ -1034,7 +1066,8 @@ class STTEngine:
             return None
         word_count = len(re.findall(r"\w+", cleaned, flags=re.UNICODE))
         if word_count < MIN_TRANSCRIPT_WORDS and len(cleaned) > 1:
-            return "too_few_words"
+            if not followup:
+                return "too_few_words"
         if HYBRID_REJECT_TOO_SHORT and len(cleaned) < MIN_TRANSCRIPT_CHARS:
             return "too_short"
         if cleaned in FILLER_TRANSCRIPTS:
@@ -1055,8 +1088,10 @@ class STTEngine:
             return "repeated_filler"
 
         if followup:
+            if cleaned in INITIAL_FRAGMENT_PHRASES:
+                return "fragment_unclear"
             if words and all(word in GARBAGE_WORDS for word in words):
-                return "followup_garbage"
+                return "followup_noise"
             followup_category = self._classify_followup(cleaned)
             if followup_category == "unclear_noise":
                 return "followup_unclear"

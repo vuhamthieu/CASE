@@ -873,6 +873,13 @@ class CASEPersonality:
             return [cleaned]
         first = cleaned[:split_at].strip()
         rest = cleaned[split_at:].strip()
+        rest_words = re.findall(r"\w+", rest)
+        if rest and (len(rest) < 15 or len(rest_words) < 3):
+            logger.info(
+                "RESPONSE_CHUNK_RESPLIT_SKIPPED: reason=tiny_remainder chars=%s",
+                len(rest),
+            )
+            return [cleaned]
         return [part for part in (first, rest) if part]
 
     async def _publish_stream_start_once(self, turn_id: int, metrics: dict) -> None:

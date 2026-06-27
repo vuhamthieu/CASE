@@ -162,6 +162,24 @@ class SttWakeGuardTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(engine._transcript_reject_reason(text, followup=True))
 
+    def test_conversational_followups_are_accepted(self):
+        engine = make_engine()
+        for text in (
+            "yeah it's not quite quiet though",
+            "now you are the best",
+            "so you pay attention then",
+            "you are not listening",
+            "i don't think so",
+            "okay that makes sense",
+            "no that's wrong",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    engine._classify_followup(engine._normalize_transcript(text)),
+                    "conversational_followup",
+                )
+                self.assertIsNone(engine._transcript_reject_reason(text, followup=True))
+
     def test_more_request_followups_are_accepted(self):
         engine = make_engine()
         for text in ("again", "one more", "another one", "tell me more", "make it longer", "funnier"):
@@ -208,6 +226,18 @@ class SttWakeGuardTests(unittest.TestCase):
         self.assertIn(
             engine._transcript_reject_reason("case", followup=True),
             {"garbage", "wake_word_only"},
+        )
+        self.assertIn(
+            engine._transcript_reject_reason("hey case", followup=True),
+            {"followup_unclear", "wake_word_only"},
+        )
+        self.assertIn(
+            engine._transcript_reject_reason("um", followup=True),
+            {"filler", "too_short"},
+        )
+        self.assertEqual(
+            engine._transcript_reject_reason("random", followup=True),
+            "followup_unclear",
         )
         self.assertEqual(engine._transcript_reject_reason("", followup=True), "empty")
 
