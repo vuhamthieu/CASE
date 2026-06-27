@@ -80,6 +80,31 @@ class TranscriptRepairTests(unittest.TestCase):
         self.assertEqual(unrepaired, "tell me up")
         self.assertIsNone(no_reason)
 
+    def test_embedded_followup_commands_strip_junk_prefix(self):
+        cases = {
+            "the i very from can you tell me something funny": "can you tell me something funny",
+            "uh can you tell me something funny": "can you tell me something funny",
+            "sorry i mean tell me a joke": "tell me a joke",
+        }
+        for transcript, expected in cases.items():
+            with self.subTest(transcript=transcript):
+                repaired, reason = repair_common_transcript(transcript)
+                self.assertEqual(repaired, expected)
+                self.assertEqual(reason, "embedded_known_command")
+
+    def test_short_followup_phrase_repairs(self):
+        cases = {
+            "again": "tell me another one",
+            "one more": "tell me another one",
+            "yeah can you tell me long": "can you tell me something longer",
+            "funnier": "tell me something funnier",
+        }
+        for transcript, expected in cases.items():
+            with self.subTest(transcript=transcript):
+                repaired, reason = repair_common_transcript(transcript)
+                self.assertEqual(repaired, expected)
+                self.assertIn(reason, {"embedded_known_command", "followup_phrase"})
+
 
 if __name__ == "__main__":
     unittest.main()

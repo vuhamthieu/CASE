@@ -18,6 +18,31 @@ COMMON_TRANSCRIPT_REPAIRS = {
     "are you doing": "What are you doing?",
 }
 
+EMBEDDED_FOLLOWUP_COMMAND_REPAIRS = {
+    "can you tell me something funny": "can you tell me something funny",
+    "tell me something funny": "tell me something funny",
+    "tell me another joke": "tell me another joke",
+    "tell me a joke": "tell me a joke",
+    "one more": "tell me another one",
+    "again": "tell me another one",
+    "do another one": "do another one",
+    "make it funnier": "make it funnier",
+    "tell me something longer": "tell me something longer",
+    "continue": "continue",
+    "go on": "go on",
+    "can you roast me": "can you roast me",
+    "roast me": "roast me",
+}
+
+FOLLOWUP_PHRASE_REPAIRS = {
+    "yeah can you tell me long": "can you tell me something longer",
+    "can you tell me long": "can you tell me something longer",
+    "make it longer": "tell me a longer version",
+    "make it shorter": "tell me a shorter version",
+    "funnier": "tell me something funnier",
+    "more funny": "tell me something funnier",
+}
+
 MALFORMED_UNREPAIRED_PREFIXES = (
     "k ",
 )
@@ -37,6 +62,19 @@ def repair_common_transcript(
     repaired = COMMON_TRANSCRIPT_REPAIRS.get(cleaned)
     if repaired:
         return repaired, "common_phrase"
+    repaired = FOLLOWUP_PHRASE_REPAIRS.get(cleaned)
+    if repaired:
+        return repaired, "followup_phrase"
+    for phrase, replacement in EMBEDDED_FOLLOWUP_COMMAND_REPAIRS.items():
+        if cleaned == phrase:
+            return replacement, "embedded_known_command"
+        marker = f" {phrase}"
+        if marker in cleaned:
+            return replacement, "embedded_known_command"
+    if cleaned.startswith("sorry i mean "):
+        remainder = cleaned.removeprefix("sorry i mean ").strip()
+        if remainder in EMBEDDED_FOLLOWUP_COMMAND_REPAIRS:
+            return EMBEDDED_FOLLOWUP_COMMAND_REPAIRS[remainder], "embedded_known_command"
     if "real a longer joke" in cleaned:
         repaired_text = re.sub(
             r"\breal\s+a\s+longer\s+joke\b",

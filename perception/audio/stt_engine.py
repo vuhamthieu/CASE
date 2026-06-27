@@ -256,9 +256,43 @@ FOLLOWUP_ACCEPT_PATTERNS = (
 
 FOLLOWUP_MEANINGFUL_PHRASES = {
     "very funny",
+    "that is very funny",
     "that was funny",
     "thats funny",
+    "that's funny",
     "that is funny",
+    "not funny",
+    "that was bad",
+    "boring",
+    "haha",
+    "lol",
+    "nice",
+    "good one",
+    "try again",
+}
+
+FOLLOWUP_MORE_REQUESTS = {
+    "again",
+    "one more",
+    "another one",
+    "tell me more",
+    "make it longer",
+    "make it shorter",
+    "funnier",
+    "more funny",
+    "tell me another one",
+    "tell me something longer",
+    "tell me something funnier",
+    "continue",
+    "go on",
+}
+
+FOLLOWUP_CORRECTION_STARTERS = {
+    "sorry",
+    "i mean",
+    "no i mean",
+    "actually",
+    "wait",
 }
 
 JOKE_CONTEXT_WORDS = {"joke", "funny", "roast", "laugh", "punchline"}
@@ -897,21 +931,31 @@ class STTEngine:
         context = self._normalize_transcript(self._last_published_transcript)
         return any(word in context for word in JOKE_CONTEXT_WORDS)
 
-    def _has_clear_followup_intent(self, cleaned: str) -> bool:
+    def _classify_followup(self, cleaned: str) -> str:
         normalized = self._strip_followup_fillers(cleaned)
-        words = re.findall(r"\w+", cleaned, flags=re.UNICODE)
         stripped_words = re.findall(r"\w+", normalized, flags=re.UNICODE)
         if not stripped_words:
-            return False
-        if any(normalized.startswith(pattern) for pattern in FOLLOWUP_ACCEPT_PATTERNS):
-            return True
-        if stripped_words[0] in FOLLOWUP_COMMAND_STARTERS:
-            return True
+            return "unclear_noise"
+        if normalized in WAKE_ONLY_TRANSCRIPTS:
+            return "unclear_noise"
+        if normalized in FOLLOWUP_MORE_REQUESTS:
+            return "followup_more_request"
         if normalized in FOLLOWUP_MEANINGFUL_PHRASES:
-            return self._recent_context_is_joke()
-        if any(word in normalized for word in {"joke", "roast", "picture", "camera", "vision"}):
-            return True
-        return False
+            return "followup_feedback"
+        if any(normalized.startswith(starter) for starter in FOLLOWUP_CORRECTION_STARTERS):
+            return "followup_correction"
+        if any(normalized.startswith(pattern) for pattern in FOLLOWUP_ACCEPT_PATTERNS):
+            return "clear_followup_question"
+        if stripped_words[0] in FOLLOWUP_COMMAND_STARTERS:
+            if stripped_words[0] in {"tell", "show", "give", "make", "continue", "explain"}:
+                return "clear_followup_command"
+            return "clear_followup_question"
+        if any(word in normalized for word in {"joke", "roast", "picture", "camera", "vision", "funny"}):
+            return "clear_followup_command"
+        return "unclear_noise"
+
+    def _has_clear_followup_intent(self, cleaned: str) -> bool:
+        return self._classify_followup(cleaned) != "unclear_noise"
 
     @staticmethod
     def _strip_followup_fillers(cleaned: str) -> str:
@@ -955,33 +999,32 @@ class STTEngine:
         if cleaned == self._last_published_transcript:
             return "duplicate"
 
-        if word_count < MIN_TRANSCRIPT_WORDS:
-            return "too_few_words"
-
-        alpha_count = sum(ch.isalpha() for ch in cleaned)
-        if alpha_count < MIN_TRANSCRIPT_CHARS:
-            return "not_enough_letters"
-
         words = re.findall(r"\w+", cleaned, flags=re.UNICODE)
         unique_words = set(words)
         if len(words) >= 3 and len(unique_words) <= 1:
             return "repeated_filler"
 
         if followup:
-            if len(cleaned) < 8:
-                return "followup_too_short"
-            if word_count < 2:
-                return "followup_too_few_words"
             if words and all(word in GARBAGE_WORDS for word in words):
                 return "followup_garbage"
-            if not self._has_clear_followup_intent(cleaned):
+            followup_category = self._classify_followup(cleaned)
+            if followup_category == "unclear_noise":
                 return "followup_unclear"
             logging.info(
-                "TRANSCRIPT_ACCEPT: reason=clear_followup_question text=%r",
+                "TRANSCRIPT_ACCEPT: reason=%s text=%r",
+                followup_category,
                 text,
             )
             if REQUIRE_DIRECTED_SPEECH_IN_FOLLOWUP and "case" not in cleaned:
                 return "not_directed"
+            return None
+
+        if word_count < MIN_TRANSCRIPT_WORDS:
+            return "too_few_words"
+
+        alpha_count = sum(ch.isalpha() for ch in cleaned)
+        if alpha_count < MIN_TRANSCRIPT_CHARS:
+            return "not_enough_letters"
 
         return None
 
@@ -991,6 +1034,14 @@ class STTEngine:
             recent_context=self._last_published_transcript,
         )
         if reason:
+            if reason == "embedded_known_command":
+                logging.info(
+                    "FOLLOWUP_REPAIR: original=%r repaired=%r reason=%s",
+                    text,
+                    repaired,
+                    reason,
+                )
+                return repaired
             logging.info(
                 "TRANSCRIPT_REPAIR: before=%r after=%r reason=%s",
                 text,

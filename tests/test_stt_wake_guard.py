@@ -130,12 +130,12 @@ class SttWakeGuardTests(unittest.TestCase):
             "Tell me a longer joke.",
             "Do you know who I am?",
             "Are you still there?",
+            "yeah can you tell me long",
         )
         for text in examples:
             with self.subTest(text=text):
-                self.assertIsNone(
-                    engine._transcript_reject_reason(text, followup=True)
-                )
+                repaired = engine._repair_transcript(text)
+                self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
 
     def test_followup_filler_stripping_for_intent_classification(self):
         engine = make_engine()
@@ -143,16 +143,34 @@ class SttWakeGuardTests(unittest.TestCase):
             engine._has_clear_followup_intent("yeah what is your current humor percentage")
         )
 
-    def test_meaningful_joke_feedback_requires_context(self):
+    def test_feedback_followups_are_accepted(self):
         engine = make_engine()
-        self.assertEqual(
-            engine._transcript_reject_reason("Very funny.", followup=True),
-            "followup_unclear",
+        for text in ("that is very funny", "Very funny.", "not funny", "boring", "haha", "good one"):
+            with self.subTest(text=text):
+                self.assertIsNone(engine._transcript_reject_reason(text, followup=True))
+
+    def test_more_request_followups_are_accepted(self):
+        engine = make_engine()
+        for text in ("again", "one more", "another one", "tell me more", "make it longer", "funnier"):
+            with self.subTest(text=text):
+                repaired = engine._repair_transcript(text)
+                self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+
+    def test_embedded_followup_command_is_repaired_and_accepted(self):
+        engine = make_engine()
+        repaired = engine._repair_transcript(
+            "the i very from can you tell me something funny"
         )
-        engine._last_published_transcript = "tell me a joke"
-        self.assertIsNone(
-            engine._transcript_reject_reason("Very funny.", followup=True)
+        self.assertEqual(repaired, "can you tell me something funny")
+        self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+
+    def test_wake_echo_and_empty_followups_are_rejected(self):
+        engine = make_engine()
+        self.assertIn(
+            engine._transcript_reject_reason("case", followup=True),
+            {"garbage", "wake_word_only"},
         )
+        self.assertEqual(engine._transcript_reject_reason("", followup=True), "empty")
 
     def test_joke_context_repairs_longer_job(self):
         engine = make_engine()
