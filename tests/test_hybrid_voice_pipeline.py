@@ -1,4 +1,7 @@
 import unittest
+import asyncio
+import time
+from itertools import count
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +44,22 @@ class FakeBus:
 
     async def publish(self, topic, payload=None):
         self.events.append((topic, payload))
+
+    def subscribe(self, topic, callback):
+        pass
+
+
+class FakeResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class SlowFirstTokenChat:
+    def send_message_stream(self, text):
+        return iter(())
+
+    def send_message(self, text):
+        return FakeResponse("Fallback response.")
 
 
 class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
@@ -117,8 +136,12 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(defaults.CASE_TTS_ENABLE_THINKING_FALLBACK)
         self.assertEqual(defaults.CASE_TTS_FALLBACK_SHORT_REPLY, "One moment.")
         self.assertTrue(defaults.CASE_TTS_FALLBACK_ONLY_ON_ERROR)
-        self.assertEqual(defaults.LLM_HARD_TIMEOUT_SEC, 8.0)
-        self.assertEqual(defaults.LLM_FIRST_TOKEN_BUDGET_SEC, 2.0)
+        self.assertEqual(defaults.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC, 4.0)
+        self.assertEqual(defaults.CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC, 15.0)
+        self.assertTrue(defaults.CASE_LLM_FALLBACK_TO_FULL_ON_FIRST_TOKEN_TIMEOUT)
+        self.assertFalse(defaults.CASE_LLM_ENABLE_WAITING_FILLER)
+        self.assertEqual(defaults.LLM_HARD_TIMEOUT_SEC, 15.0)
+        self.assertEqual(defaults.LLM_FIRST_TOKEN_BUDGET_SEC, 4.0)
         self.assertFalse(defaults.VOICE_ENABLE_AFC)
         self.assertFalse(defaults.VOICE_ENABLE_TOOLS_BY_DEFAULT)
         self.assertEqual(defaults.AUDIO_PLAYBACK_BACKEND, "sounddevice")
@@ -179,6 +202,105 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
             clear=True,
         ):
             self.assertEqual(configured_input_device(), "USB microphone")
+
+    async def test_stream_start_does_not_queue_tts_start_until_chunk(self):
+        bus = FakeBus()
+        voice = CASEVoice.__new__(CASEVoice)
+        voice.bus = bus
+        voice.tts_text_queue = asyncio.Queue()
+        voice.audio_playback_queue = asyncio.Queue()
+        voice._stream_pending_starts = {}
+        voice._stream_started_turns = set()
+        voice._ensure_workers = lambda: None
+
+        metrics = {"turn_id": 7}
+        await voice.handle_stream_start({"turn_id": 7, "metrics": metrics})
+        self.assertTrue(voice.tts_text_queue.empty())
+
+        await voice.handle_stream_chunk(
+            {
+                "turn_id": 7,
+                "sequence": 0,
+                "text": "Ready.",
+                "queued_at": time.monotonic(),
+                "metrics": metrics,
+            }
+        )
+        first = await voice.tts_text_queue.get()
+        second = await voice.tts_text_queue.get()
+        self.assertEqual(first["kind"], "start")
+        self.assertEqual(second["kind"], "chunk")
+
+    async def test_first_token_timeout_falls_back_before_stream_start(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality.chat_session = SlowFirstTokenChat()
+        personality.realtime_hybrid = True
+        personality._turn_numbers = count(1)
+        personality._latest_turn_metrics = {}
+
+        async def fake_to_thread(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "send_message_stream":
+                await asyncio.sleep(0.02)
+            return func(*args, **kwargs)
+
+        with patch("cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 0.01), patch(
+            "cognition.personality.asyncio.to_thread",
+            new=fake_to_thread,
+        ):
+            completed = await personality._handle_streaming_response("tell me a joke")
+
+        self.assertTrue(completed)
+        topics = [topic for topic, _payload in bus.events]
+        self.assertIn("AI_SPEAK_STREAM_START", topics)
+        self.assertIn("AI_SPEAK_STREAM_CHUNK", topics)
+        self.assertIn("AI_SPEAK_STREAM_END", topics)
+        self.assertLess(
+            topics.index("AI_SPEAK_STREAM_START"),
+            topics.index("AI_SPEAK_STREAM_CHUNK"),
+        )
+        self.assertNotIn("TTS_START", topics)
+
+    async def test_total_stream_timeout_after_partial_flushes_buffer(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality.chat_session = SlowFirstTokenChat()
+        personality.realtime_hybrid = True
+        personality._turn_numbers = count(1)
+        personality._latest_turn_metrics = {}
+        calls = {"next": 0, "full": 0}
+
+        async def fake_to_thread(func, *args, **kwargs):
+            name = getattr(func, "__name__", "")
+            if name == "send_message_stream":
+                return iter(())
+            if name == "_next_stream_item":
+                calls["next"] += 1
+                if calls["next"] == 1:
+                    return True, FakeResponse(
+                        "I told my CPU to take a break; it reported me."
+                    )
+                await asyncio.sleep(0.03)
+                return False, None
+            if name == "send_message":
+                calls["full"] += 1
+            return func(*args, **kwargs)
+
+        with patch("cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 1.0), patch(
+            "cognition.personality.CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC",
+            0.02,
+        ), patch("cognition.personality.asyncio.to_thread", new=fake_to_thread):
+            completed = await personality._handle_streaming_response("tell me a joke")
+
+        self.assertTrue(completed)
+        self.assertEqual(calls["full"], 0)
+        chunks = [payload for topic, payload in bus.events if topic == "AI_SPEAK_STREAM_CHUNK"]
+        self.assertTrue(chunks)
+        spoken = " ".join(chunk["text"] for chunk in chunks)
+        self.assertIn("I told my CPU to take a break", spoken)
+        self.assertIn("reported me", spoken)
 
     def test_generated_ack_has_silence_padding_and_fades(self):
         raw = np.full(SAMPLE_RATE // 5, 12_000, dtype=np.int16)

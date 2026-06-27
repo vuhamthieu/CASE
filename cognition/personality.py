@@ -22,6 +22,9 @@ from src.realtime.realtime_config import (
     CASE_REALTIME_TTS_TEXT_DEADLINE_SEC,
     CASE_RESPONSE_MODE,
     CASE_STREAM_FULL_RESPONSE,
+    CASE_LLM_FALLBACK_TO_FULL_ON_FIRST_TOKEN_TIMEOUT,
+    CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
+    CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC,
     CASE_TTS_ALLOW_MULTI_CHUNK,
     CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
     CASE_TTS_FIRST_CHUNK_MAX_CHARS,
@@ -55,8 +58,6 @@ from src.realtime.realtime_config import (
     CASE_VOICE_JOKE_MAX_SENTENCES,
     CASE_VOICE_REPLY_MAX_SENTENCES,
     CASE_VOICE_REPLY_STYLE,
-    LLM_FIRST_TOKEN_BUDGET_SEC,
-    LLM_HARD_TIMEOUT_SEC,
 )
 from src.realtime.realtime_persona import build_case_system_instruction
 from src.realtime.response_chunker import ResponseChunker as StreamingResponseChunker
@@ -449,27 +450,11 @@ class CASEPersonality:
             "transcript_final_at",
             metrics["transcript_final_at"],
         )
-        chunker = StreamingResponseChunker(
-            min_chars=CASE_TTS_CHUNK_MIN_CHARS,
-            max_chars=CASE_TTS_CHUNK_MAX_CHARS,
-            absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
-            first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
-            first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-            normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
-            normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
-            flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
-            max_chunks=int(metrics["max_tts_chunks"]),
-            max_total_chars=int(metrics["max_spoken_chars"]),
-            prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
-            merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
-            tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
-            single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
-        )
+        chunker = self._new_stream_chunker(metrics)
         extractor = DialogueJsonExtractor()
         raw_response = ""
         emitted_chunks = 0
         stream_started = False
-        first_token_budget_logged = False
 
         metrics["llm_stream_start_at"] = time.monotonic()
         logger.info(
@@ -485,23 +470,85 @@ class CASEPersonality:
             logger.info("AFC_DISABLED: normal_chat")
             logger.info("ACTION_ROUTER_DISABLED: tools_enabled=False")
             logger.info("AFC_SDK_LOG_IGNORED: tools_enabled=False no_tools_declared=True")
-        stream = await asyncio.to_thread(
-            self.chat_session.send_message_stream,
-            user_text,
+        logger.info(
+            "LLM_STREAM_WAITING_FOR_FIRST_TOKEN timeout=%.1fs",
+            CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
         )
-
-        await self._publish_and_yield(
-            "AI_SPEAK_STREAM_START",
-            {"turn_id": turn_id, "metrics": metrics},
-        )
+        try:
+            stream = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.chat_session.send_message_stream,
+                    user_text,
+                ),
+                timeout=CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            metrics["llm_first_token_timeout_at"] = time.monotonic()
+            logger.warning(
+                "LLM_FIRST_TOKEN_TIMEOUT: fallback=full_response before_tts_start=True"
+            )
+            return await self._fallback_full_response_stream(
+                turn_id,
+                user_text,
+                metrics,
+                reason="first_token_timeout",
+            )
         stream_started = True
 
         try:
+            first_token_deadline = (
+                metrics["llm_stream_start_at"] + CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC
+            )
+            stream_deadline = (
+                metrics["llm_stream_start_at"] + CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC
+            )
             while True:
-                has_item, response_chunk = await asyncio.to_thread(
-                    _next_stream_item,
-                    stream,
-                )
+                now = time.monotonic()
+                if "first_llm_chunk_at" not in metrics:
+                    remaining = min(first_token_deadline, stream_deadline) - now
+                    if remaining <= 0:
+                        metrics["llm_first_token_timeout_at"] = time.monotonic()
+                        logger.warning(
+                            "LLM_FIRST_TOKEN_TIMEOUT: fallback=full_response before_tts_start=True"
+                        )
+                        return await self._fallback_full_response_stream(
+                            turn_id,
+                            user_text,
+                            metrics,
+                            reason="first_token_timeout",
+                        )
+                else:
+                    remaining = stream_deadline - now
+                    if remaining <= 0:
+                        metrics["llm_stream_total_timeout_at"] = time.monotonic()
+                        logger.warning(
+                            "LLM_STREAM_TOTAL_TIMEOUT: partial_chunks=%s",
+                            emitted_chunks,
+                        )
+                        break
+                try:
+                    has_item, response_chunk = await asyncio.wait_for(
+                        asyncio.to_thread(_next_stream_item, stream),
+                        timeout=max(0.05, remaining),
+                    )
+                except asyncio.TimeoutError:
+                    if "first_llm_chunk_at" not in metrics:
+                        metrics["llm_first_token_timeout_at"] = time.monotonic()
+                        logger.warning(
+                            "LLM_FIRST_TOKEN_TIMEOUT: fallback=full_response before_tts_start=True"
+                        )
+                        return await self._fallback_full_response_stream(
+                            turn_id,
+                            user_text,
+                            metrics,
+                            reason="first_token_timeout",
+                        )
+                    metrics["llm_stream_total_timeout_at"] = time.monotonic()
+                    logger.warning(
+                        "LLM_STREAM_TOTAL_TIMEOUT: partial_chunks=%s",
+                        emitted_chunks,
+                    )
+                    break
                 if not has_item:
                     break
 
@@ -524,24 +571,6 @@ class CASEPersonality:
                         metrics,
                     )
                     emitted_chunks += 1
-
-                elapsed = time.monotonic() - metrics["llm_stream_start_at"]
-                if (
-                    "first_llm_chunk_at" not in metrics
-                    and not first_token_budget_logged
-                    and elapsed >= LLM_FIRST_TOKEN_BUDGET_SEC
-                ):
-                    logger.info(
-                        "LLM_BUDGET: first token late actual=%.2fs budget=%.2fs action=wait",
-                        elapsed,
-                        LLM_FIRST_TOKEN_BUDGET_SEC,
-                    )
-                    first_token_budget_logged = True
-                if elapsed >= LLM_HARD_TIMEOUT_SEC and not emitted_chunks:
-                    metrics["llm_hard_timeout_at"] = time.monotonic()
-                    raise TimeoutError(
-                        f"Gemini stream exceeded hard timeout {LLM_HARD_TIMEOUT_SEC:.1f}s"
-                    )
 
             if self.realtime_hybrid:
                 parsed_dialogue, action = raw_response.strip(), "IDLE"
@@ -595,10 +624,11 @@ class CASEPersonality:
             metrics["full_response_done_at"] = time.monotonic()
             metrics["chunks_emitted"] = emitted_chunks
             metrics["total_response_chars"] = int(metrics.get("tts_spoken_chars", 0))
-            await self._publish_and_yield(
-                "AI_SPEAK_STREAM_END",
-                {"turn_id": turn_id, "metrics": metrics},
-            )
+            if metrics.get("stream_start_published"):
+                await self._publish_and_yield(
+                    "AI_SPEAK_STREAM_END",
+                    {"turn_id": turn_id, "metrics": metrics},
+                )
 
             if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
@@ -609,7 +639,10 @@ class CASEPersonality:
             if not stream_started:
                 raise
 
-            logger.exception("Gemini stream failed after the TTS turn started.")
+            logger.exception(
+                "Gemini stream failed after start; chunks_queued=%s",
+                emitted_chunks,
+            )
             pending = chunker.buffer.strip() if emitted_chunks == 0 else ""
             chunker.buffer = ""
             if pending:
@@ -628,7 +661,9 @@ class CASEPersonality:
 
             action = "IDLE"
             if emitted_chunks == 0 and STREAMING_LLM_FALLBACK_TO_FULL_RESPONSE:
-                logger.warning("Fetching a full response inside the active TTS turn.")
+                logger.warning(
+                    "Fetching a full response before any TTS chunks were queued."
+                )
                 try:
                     response = await asyncio.to_thread(
                         self.chat_session.send_message,
@@ -638,22 +673,7 @@ class CASEPersonality:
                         dialogue, action = (response.text or "").strip(), "IDLE"
                     else:
                         dialogue, action = self._parse_response(response.text or "")
-                    fallback_chunker = StreamingResponseChunker(
-                        min_chars=CASE_TTS_CHUNK_MIN_CHARS,
-                        max_chars=CASE_TTS_CHUNK_MAX_CHARS,
-                        absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
-                        first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
-                        first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-                        normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
-                        normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
-                        flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
-                        max_chunks=int(metrics["max_tts_chunks"]),
-                        max_total_chars=int(metrics["max_spoken_chars"]),
-                        prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
-                        merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
-                        tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
-                        single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
-                    )
+                    fallback_chunker = self._new_stream_chunker(metrics)
                     fallback_chunks = fallback_chunker.feed(dialogue)
                     fallback_chunks.extend(fallback_chunker.flush())
                     for speech_chunk in fallback_chunks:
@@ -675,10 +695,11 @@ class CASEPersonality:
                     raise
 
             metrics["full_response_done_at"] = time.monotonic()
-            await self._publish_and_yield(
-                "AI_SPEAK_STREAM_END",
-                {"turn_id": turn_id, "metrics": metrics},
-            )
+            if metrics.get("stream_start_published"):
+                await self._publish_and_yield(
+                    "AI_SPEAK_STREAM_END",
+                    {"turn_id": turn_id, "metrics": metrics},
+                )
             if self._should_dispatch_action(self.realtime_hybrid, action):
                 await self._publish_and_yield("MOTION_CMD", action)
             return True
@@ -750,6 +771,7 @@ class CASEPersonality:
             queued_at,
             text,
         )
+        await self._publish_stream_start_once(turn_id, metrics)
         await self._publish_and_yield(
             "AI_SPEAK_STREAM_CHUNK",
             {
@@ -760,6 +782,98 @@ class CASEPersonality:
                 "metrics": metrics,
             },
         )
+
+    async def _publish_stream_start_once(self, turn_id: int, metrics: dict) -> None:
+        if metrics.get("stream_start_published"):
+            return
+        metrics["stream_start_published"] = True
+        await self._publish_and_yield(
+            "AI_SPEAK_STREAM_START",
+            {"turn_id": turn_id, "metrics": metrics},
+        )
+
+    @staticmethod
+    def _new_stream_chunker(metrics: dict) -> StreamingResponseChunker:
+        return StreamingResponseChunker(
+            min_chars=CASE_TTS_CHUNK_MIN_CHARS,
+            max_chars=CASE_TTS_CHUNK_MAX_CHARS,
+            absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+            first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
+            first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
+            normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
+            normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
+            flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
+            max_chunks=int(metrics["max_tts_chunks"]),
+            max_total_chars=int(metrics["max_spoken_chars"]),
+            prefer_sentence_boundary=CASE_TTS_CHUNK_PREFER_SENTENCE_BOUNDARY,
+            merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
+            tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
+            single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+        )
+
+    async def _fallback_full_response_stream(
+        self,
+        turn_id: int,
+        user_text: str,
+        metrics: dict,
+        *,
+        reason: str,
+    ) -> bool:
+        if reason == "first_token_timeout" and not CASE_LLM_FALLBACK_TO_FULL_ON_FIRST_TOKEN_TIMEOUT:
+            fallback = self._error_fallback_text()
+            if not fallback:
+                return False
+            await self._queue_stream_chunk(turn_id, 0, fallback, metrics)
+            await self._publish_and_yield(
+                "AI_SPEAK_STREAM_END",
+                {"turn_id": turn_id, "metrics": metrics},
+            )
+            return True
+
+        logger.warning("LLM_FALLBACK_FULL_RESPONSE: reason=%s", reason)
+        action = "IDLE"
+        emitted_chunks = 0
+        try:
+            response = await asyncio.to_thread(
+                self.chat_session.send_message,
+                user_text,
+            )
+            if self.realtime_hybrid:
+                dialogue, action = (response.text or "").strip(), "IDLE"
+            else:
+                dialogue, action = self._parse_response(response.text or "")
+            fallback_chunker = self._new_stream_chunker(metrics)
+            fallback_chunks = fallback_chunker.feed(dialogue)
+            fallback_chunks.extend(fallback_chunker.flush())
+            for speech_chunk in fallback_chunks:
+                await self._queue_stream_chunk(
+                    turn_id,
+                    emitted_chunks,
+                    speech_chunk,
+                    metrics,
+                )
+                emitted_chunks += 1
+        except Exception:
+            logger.exception("Full response fallback failed.")
+
+        if emitted_chunks == 0:
+            fallback = self._error_fallback_text()
+            if fallback:
+                await self._queue_stream_chunk(turn_id, 0, fallback, metrics)
+                emitted_chunks = 1
+
+        if emitted_chunks == 0:
+            return False
+
+        metrics["full_response_done_at"] = time.monotonic()
+        metrics["chunks_emitted"] = emitted_chunks
+        await self._publish_and_yield(
+            "AI_SPEAK_STREAM_END",
+            {"turn_id": turn_id, "metrics": metrics},
+        )
+        if self._should_dispatch_action(self.realtime_hybrid, action):
+            await self._publish_and_yield("MOTION_CMD", action)
+        return True
 
     @staticmethod
     def _allows_long_answer(user_text: str) -> bool:

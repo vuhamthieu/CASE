@@ -113,6 +113,8 @@ class CASEVoice:
             max_workers=max(1, CASE_TTS_PLAYBACK_CONCURRENCY),
             thread_name_prefix="case-audio-playback",
         )
+        self._stream_pending_starts: dict[int, dict] = {}
+        self._stream_started_turns: set[int] = set()
         self.playback_manager = get_playback_manager()
         self._playback_backend = self.playback_manager.backend
 
@@ -206,13 +208,13 @@ class CASEVoice:
 
     async def handle_stream_start(self, payload: dict) -> None:
         self._ensure_workers()
-        await self.tts_text_queue.put(
-            {
-                "kind": "start",
-                "turn_id": payload["turn_id"],
-                "metrics": payload["metrics"],
-            }
-        )
+        turn_id = int(payload["turn_id"])
+        self._stream_pending_starts[turn_id] = {
+            "kind": "start",
+            "turn_id": turn_id,
+            "metrics": payload["metrics"],
+        }
+        logger.info("CASE_TTS: stream pending turn=%s waiting_for_first_chunk", turn_id)
 
     async def handle_stream_chunk(self, payload: dict) -> None:
         text = str(payload.get("text", "")).strip()
@@ -233,10 +235,19 @@ class CASEVoice:
 
         logger.info("CASE_TTS: speaking stream chunk=%r", text)
         self._ensure_workers()
+        turn_id = int(payload["turn_id"])
+        if turn_id not in self._stream_started_turns:
+            start_item = self._stream_pending_starts.pop(
+                turn_id,
+                {"kind": "start", "turn_id": turn_id, "metrics": metrics},
+            )
+            await self.tts_text_queue.put(start_item)
+            self._stream_started_turns.add(turn_id)
+            logger.info("CASE_TTS: stream start released turn=%s", turn_id)
         await self.tts_text_queue.put(
             {
                 "kind": "chunk",
-                "turn_id": payload["turn_id"],
+                "turn_id": turn_id,
                 "sequence": payload["sequence"],
                 "text": text,
                 "queued_at": payload.get("queued_at", time.monotonic()),
@@ -246,13 +257,19 @@ class CASEVoice:
 
     async def handle_stream_end(self, payload: dict) -> None:
         self._ensure_workers()
+        turn_id = int(payload["turn_id"])
+        if turn_id not in self._stream_started_turns:
+            self._stream_pending_starts.pop(turn_id, None)
+            logger.info("CASE_TTS: stream ended without speakable chunks turn=%s", turn_id)
+            return
         await self.tts_text_queue.put(
             {
                 "kind": "end",
-                "turn_id": payload["turn_id"],
+                "turn_id": turn_id,
                 "metrics": payload["metrics"],
             }
         )
+        self._stream_started_turns.discard(turn_id)
 
     async def _synthesis_worker(self) -> None:
         assert self.tts_text_queue is not None
