@@ -564,13 +564,12 @@ class CASEPersonality:
                 raw_response += fragment
                 dialogue_fragment = fragment if self.realtime_hybrid else extractor.feed(fragment)
                 for speech_chunk in chunker.feed(dialogue_fragment):
-                    await self._queue_stream_chunk(
+                    emitted_chunks += await self._queue_stream_chunk(
                         turn_id,
                         emitted_chunks,
                         speech_chunk,
                         metrics,
                     )
-                    emitted_chunks += 1
 
             if self.realtime_hybrid:
                 parsed_dialogue, action = raw_response.strip(), "IDLE"
@@ -579,13 +578,12 @@ class CASEPersonality:
 
             if emitted_chunks == 0 and not chunker.buffer.strip() and parsed_dialogue:
                 for speech_chunk in chunker.feed(parsed_dialogue):
-                    await self._queue_stream_chunk(
+                    emitted_chunks += await self._queue_stream_chunk(
                         turn_id,
                         emitted_chunks,
                         speech_chunk,
                         metrics,
                     )
-                    emitted_chunks += 1
 
             for speech_chunk in chunker.flush():
                 logger.info(
@@ -593,13 +591,12 @@ class CASEPersonality:
                     len(speech_chunk),
                     speech_chunk,
                 )
-                await self._queue_stream_chunk(
+                emitted_chunks += await self._queue_stream_chunk(
                     turn_id,
                     emitted_chunks,
                     speech_chunk,
                     metrics,
                 )
-                emitted_chunks += 1
 
             if emitted_chunks == 0:
                 pending = chunker.buffer.strip() or parsed_dialogue
@@ -613,10 +610,9 @@ class CASEPersonality:
                     )
                     if speech_chunk:
                         logger.info("TTS_SAFE_TEXT: %r", speech_chunk)
-                        await self._queue_stream_chunk(
+                        emitted_chunks += await self._queue_stream_chunk(
                             turn_id, emitted_chunks, speech_chunk, metrics
                         )
-                        emitted_chunks += 1
 
             if emitted_chunks == 0:
                 raise RuntimeError("Gemini stream contained no speakable dialogue")
@@ -654,10 +650,9 @@ class CASEPersonality:
                 )
                 if speech_chunk:
                     logger.info("TTS_SAFE_TEXT: %r", speech_chunk)
-                    await self._queue_stream_chunk(
+                    emitted_chunks += await self._queue_stream_chunk(
                         turn_id, emitted_chunks, speech_chunk, metrics
                     )
-                    emitted_chunks += 1
 
             action = "IDLE"
             if emitted_chunks == 0 and STREAMING_LLM_FALLBACK_TO_FULL_RESPONSE:
@@ -677,20 +672,21 @@ class CASEPersonality:
                     fallback_chunks = fallback_chunker.feed(dialogue)
                     fallback_chunks.extend(fallback_chunker.flush())
                     for speech_chunk in fallback_chunks:
-                        await self._queue_stream_chunk(
+                        emitted_chunks += await self._queue_stream_chunk(
                             turn_id,
                             emitted_chunks,
                             speech_chunk,
                             metrics,
                         )
-                        emitted_chunks += 1
                 except Exception:
                     logger.exception("Full response fallback also failed.")
 
             if emitted_chunks == 0:
                 fallback = self._error_fallback_text()
                 if fallback:
-                    await self._queue_stream_chunk(turn_id, 0, fallback, metrics)
+                    emitted_chunks += await self._queue_stream_chunk(
+                        turn_id, emitted_chunks, fallback, metrics
+                    )
                 else:
                     raise
 
@@ -710,9 +706,12 @@ class CASEPersonality:
         sequence: int,
         text: str,
         metrics: dict,
-    ) -> None:
+    ) -> int:
+        original_text = text
         text = self._style_safe_response(
-            text, user_text=str(metrics.get("user_text", ""))
+            text,
+            user_text=str(metrics.get("user_text", "")),
+            allow_intent_rewrite=False,
         )
         if (
             metrics.get("realtime_hybrid")
@@ -726,7 +725,7 @@ class CASEPersonality:
                 if not metrics.get("tts_truncation_logged"):
                     logger.info("CASE_TTS: realtime response truncated for latency")
                     metrics["tts_truncation_logged"] = True
-                return
+                return 0
             remaining = max_chars - spoken_chars
             if len(text) > remaining:
                 text = safe_tts_text(
@@ -736,13 +735,85 @@ class CASEPersonality:
                     fallback="",
                 )
             text = self._style_safe_response(
-                text, user_text=str(metrics.get("user_text", ""))
+                text,
+                user_text=str(metrics.get("user_text", "")),
+                allow_intent_rewrite=False,
             )
             if not text:
-                return
-            logger.info("TTS_SAFE_TEXT: %r", text)
-            metrics["tts_chunks_accepted"] = accepted + 1
-            metrics["tts_spoken_chars"] = spoken_chars + len(text)
+                return 0
+            if len(text) != len(original_text) or text != original_text:
+                logger.info("TTS_SAFE_TEXT: %r", text)
+        else:
+            if not text:
+                return 0
+
+        chunks = [text]
+        if int(metrics.get("tts_chunks_accepted", 0)) == 0 and len(text) > CASE_TTS_FIRST_CHUNK_MAX_CHARS:
+            chunks = self._split_first_chunk_after_safe_text(text)
+            if len(chunks) > 1:
+                logger.info(
+                    "RESPONSE_CHUNK_RESPLIT_AFTER_SAFE_TEXT: original_chars=%s safe_chars=%s",
+                    len(original_text),
+                    len(text),
+                )
+
+        queued_count = 0
+        for offset, chunk_text in enumerate(chunks):
+            if not chunk_text:
+                continue
+            if metrics.get("realtime_hybrid") and CASE_TTS_DROP_OVERFLOW_IN_REALTIME:
+                accepted = int(metrics.get("tts_chunks_accepted", 0))
+                spoken_chars = int(metrics.get("tts_spoken_chars", 0))
+                max_chars = int(metrics.get("max_spoken_chars", CASE_RESPONSE_MAX_TOTAL_CHARS))
+                max_chunks = int(metrics.get("max_tts_chunks", CASE_TTS_REALTIME_MAX_CHUNKS))
+                if accepted >= max_chunks or spoken_chars >= max_chars:
+                    if not metrics.get("tts_truncation_logged"):
+                        logger.info("CASE_TTS: realtime response truncated for latency")
+                        metrics["tts_truncation_logged"] = True
+                    break
+                remaining = max_chars - spoken_chars
+                if len(chunk_text) > remaining:
+                    chunk_text = safe_tts_text(
+                        chunk_text,
+                        max_chars=remaining,
+                        min_clause_chars=CASE_TTS_MIN_SAFE_CHARS,
+                        fallback="",
+                    )
+                if not chunk_text:
+                    continue
+
+            normalized_chunk = " ".join(chunk_text.lower().split())
+            seen_chunks = metrics.setdefault("tts_seen_chunks", set())
+            if normalized_chunk in seen_chunks:
+                logger.info(
+                    "RESPONSE_DUPLICATE_CHUNK_SKIP: turn=%s seq=%s text=%r",
+                    turn_id,
+                    sequence + queued_count,
+                    chunk_text,
+                )
+                continue
+            seen_chunks.add(normalized_chunk)
+
+            if metrics.get("realtime_hybrid") and CASE_TTS_DROP_OVERFLOW_IN_REALTIME:
+                metrics["tts_chunks_accepted"] = int(metrics.get("tts_chunks_accepted", 0)) + 1
+                metrics["tts_spoken_chars"] = int(metrics.get("tts_spoken_chars", 0)) + len(chunk_text)
+
+            await self._publish_tts_stream_chunk(
+                turn_id,
+                sequence + queued_count,
+                chunk_text,
+                metrics,
+            )
+            queued_count += 1
+        return queued_count
+
+    async def _publish_tts_stream_chunk(
+        self,
+        turn_id: int,
+        sequence: int,
+        text: str,
+        metrics: dict,
+    ) -> None:
         queued_at = time.monotonic()
         if "first_chunk_ready_at" not in metrics:
             metrics["first_chunk_ready_at"] = queued_at
@@ -782,6 +853,27 @@ class CASEPersonality:
                 "metrics": metrics,
             },
         )
+
+    @staticmethod
+    def _split_first_chunk_after_safe_text(text: str) -> list[str]:
+        cleaned = " ".join(str(text).strip().split())
+        if len(cleaned) <= CASE_TTS_FIRST_CHUNK_MAX_CHARS:
+            return [cleaned] if cleaned else []
+        split_at = -1
+        for match in re.finditer(r"[.!?;:,](?=\s|$)", cleaned):
+            if CASE_TTS_FIRST_CHUNK_TARGET_CHARS <= match.end() <= CASE_TTS_FIRST_CHUNK_MAX_CHARS:
+                split_at = match.end()
+                break
+        if split_at < 0:
+            for match in reversed(list(re.finditer(r"\s+", cleaned[: CASE_TTS_FIRST_CHUNK_MAX_CHARS + 1]))):
+                if match.start() >= 16:
+                    split_at = match.start()
+                    break
+        if split_at < 0:
+            return [cleaned]
+        first = cleaned[:split_at].strip()
+        rest = cleaned[split_at:].strip()
+        return [part for part in (first, rest) if part]
 
     async def _publish_stream_start_once(self, turn_id: int, metrics: dict) -> None:
         if metrics.get("stream_start_published"):
@@ -846,21 +938,21 @@ class CASEPersonality:
             fallback_chunks = fallback_chunker.feed(dialogue)
             fallback_chunks.extend(fallback_chunker.flush())
             for speech_chunk in fallback_chunks:
-                await self._queue_stream_chunk(
+                emitted_chunks += await self._queue_stream_chunk(
                     turn_id,
                     emitted_chunks,
                     speech_chunk,
                     metrics,
                 )
-                emitted_chunks += 1
         except Exception:
             logger.exception("Full response fallback failed.")
 
         if emitted_chunks == 0:
             fallback = self._error_fallback_text()
             if fallback:
-                await self._queue_stream_chunk(turn_id, 0, fallback, metrics)
-                emitted_chunks = 1
+                emitted_chunks += await self._queue_stream_chunk(
+                    turn_id, emitted_chunks, fallback, metrics
+                )
 
         if emitted_chunks == 0:
             return False
@@ -972,7 +1064,12 @@ class CASEPersonality:
         )
 
     @staticmethod
-    def _style_safe_response(text: str, *, user_text: str = "") -> str:
+    def _style_safe_response(
+        text: str,
+        *,
+        user_text: str = "",
+        allow_intent_rewrite: bool = True,
+    ) -> str:
         if not text:
             return text
         user_cleaned = str(user_text).lower()
@@ -986,16 +1083,22 @@ class CASEPersonality:
             logger.info("CASE_STYLE_FILTER: rewrote stiff response")
             if "roast" in user_cleaned:
                 return SAFE_ROAST_FALLBACK
-            if "what are you doing" in user_cleaned:
+            if allow_intent_rewrite and "what are you doing" in user_cleaned:
                 return STATUS_FALLBACK
-            if "about yourself" in user_cleaned or "what are you" in user_cleaned:
+            if allow_intent_rewrite and (
+                "about yourself" in user_cleaned or "what are you" in user_cleaned
+            ):
                 return SELF_DESCRIPTION_FALLBACK
             return "I'm here, useful, and only mildly disappointed."
         if "roast" in user_cleaned and "pi 4" not in lowered:
             return SAFE_ROAST_FALLBACK
-        if "tell me more about yourself" in user_cleaned:
+        if allow_intent_rewrite and "tell me more about yourself" in user_cleaned:
             return SELF_DESCRIPTION_FALLBACK
-        if "what are you doing" in user_cleaned and "pretending this is efficient" not in lowered:
+        if (
+            allow_intent_rewrite
+            and "what are you doing" in user_cleaned
+            and "pretending this is efficient" not in lowered
+        ):
             return STATUS_FALLBACK
         return text
 

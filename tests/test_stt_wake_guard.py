@@ -145,7 +145,17 @@ class SttWakeGuardTests(unittest.TestCase):
 
     def test_feedback_followups_are_accepted(self):
         engine = make_engine()
-        for text in ("that is very funny", "Very funny.", "not funny", "boring", "haha", "good one"):
+        for text in (
+            "that is very funny",
+            "Very funny.",
+            "not funny",
+            "boring",
+            "haha",
+            "good one",
+            "yeah that's your problem",
+            "that's your problem",
+            "not my problem",
+        ):
             with self.subTest(text=text):
                 self.assertIsNone(engine._transcript_reject_reason(text, followup=True))
 

@@ -95,6 +95,76 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         chunks = [event for event in bus.events if event[0] == "AI_SPEAK_STREAM_CHUNK"]
         self.assertEqual(len(chunks), 4)
 
+    async def test_stream_chunks_do_not_stick_to_status_fallback(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        metrics = {
+            "realtime_hybrid": True,
+            "allow_long_answer": False,
+            "max_spoken_chars": 420,
+            "max_tts_chunks": 4,
+            "user_text": "what are you doing",
+        }
+        first = "Just running diagnostics and checking if you’ve actually got a plan today."
+        second = "I’m currently at rest, waiting for you to make this interesting."
+        queued = await personality._queue_stream_chunk(1, 0, first, metrics)
+        queued += await personality._queue_stream_chunk(1, queued, second, metrics)
+
+        chunks = [
+            payload["text"]
+            for topic, payload in bus.events
+            if topic == "AI_SPEAK_STREAM_CHUNK"
+        ]
+        self.assertGreaterEqual(queued, 2)
+        self.assertIn("Just running diagnostics", " ".join(chunks))
+        self.assertIn("I’m currently at rest", " ".join(chunks))
+        self.assertNotEqual(chunks[0], chunks[-1])
+
+    async def test_duplicate_stream_chunk_is_skipped(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        metrics = {
+            "realtime_hybrid": True,
+            "allow_long_answer": False,
+            "max_spoken_chars": 420,
+            "max_tts_chunks": 4,
+            "user_text": "tell me a joke",
+        }
+        text = "Short duplicate joke."
+        first = await personality._queue_stream_chunk(2, 0, text, metrics)
+        second = await personality._queue_stream_chunk(2, first, text, metrics)
+        chunks = [event for event in bus.events if event[0] == "AI_SPEAK_STREAM_CHUNK"]
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)
+        self.assertEqual(len(chunks), 1)
+
+    async def test_first_chunk_max_enforced_after_safe_text(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        metrics = {
+            "realtime_hybrid": True,
+            "allow_long_answer": False,
+            "max_spoken_chars": 420,
+            "max_tts_chunks": 4,
+            "user_text": "what are you doing",
+        }
+        text = (
+            "Monitoring audio, power, and the local situation. "
+            "Waiting for you to turn that into my problem."
+        )
+        queued = await personality._queue_stream_chunk(3, 0, text, metrics)
+        chunks = [
+            payload["text"]
+            for topic, payload in bus.events
+            if topic == "AI_SPEAK_STREAM_CHUNK"
+        ]
+        self.assertGreaterEqual(queued, 2)
+        self.assertLessEqual(len(chunks[0]), defaults.CASE_TTS_FIRST_CHUNK_MAX_CHARS)
+        self.assertEqual(" ".join(chunks), text)
+
     def test_realtime_plain_chat_does_not_dispatch_actions(self):
         self.assertFalse(CASEPersonality._should_dispatch_action(True, "ROTATE_RIGHT"))
         self.assertFalse(CASEPersonality._should_dispatch_action(True, "LED_BLINK"))

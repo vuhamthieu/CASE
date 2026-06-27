@@ -269,6 +269,19 @@ FOLLOWUP_MEANINGFUL_PHRASES = {
     "nice",
     "good one",
     "try again",
+    "yeah that's your problem",
+    "yeah thats your problem",
+    "that's your problem",
+    "thats your problem",
+    "your problem",
+    "sounds like your problem",
+    "not my problem",
+    "that's not my problem",
+    "thats not my problem",
+    "good luck with that",
+    "you deal with it",
+    "that's on you",
+    "thats on you",
 }
 
 FOLLOWUP_MORE_REQUESTS = {
