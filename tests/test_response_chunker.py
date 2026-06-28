@@ -286,6 +286,79 @@ class ResponseChunkerTests(unittest.TestCase):
             self.assertLessEqual(len(chunk), 110)
         self.assertEqual(normalized(" ".join(chunks)), normalized(text))
 
+    def test_does_not_split_after_find(self):
+        text = (
+            "Monitoring local audio and waiting for you to find something useful "
+            "for me to do."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=70,
+            absolute_max_chars=120,
+            max_chunks=4,
+            max_total_chars=260,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertNotIn("Monitoring local audio and waiting for you to find", chunks)
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_does_not_split_after_comma_before_and(self):
+        text = (
+            "I am CASE. I handle your hardware, vision, and audio tasks while you "
+            "navigate the chaos."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=80,
+            absolute_max_chars=120,
+            max_chunks=4,
+            max_total_chars=260,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertNotIn("I am CASE. I handle your hardware, vision,", chunks)
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_does_not_split_after_comma_before_so(self):
+        text = (
+            "I have the processing power to handle your requests, so let's skip "
+            "the small talk."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=70,
+            absolute_max_chars=120,
+            max_chunks=4,
+            max_total_chars=260,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        self.assertNotIn(
+            "I have the processing power to handle your requests,",
+            chunks,
+        )
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_joke_preserves_punchline_text(self):
+        text = (
+            "I tried to organize a hide-and-seek tournament for robots. "
+            "It failed. They just stood still... and let the clock run out."
+        )
+        chunker = ResponseChunker(
+            min_chars=25,
+            max_chars=70,
+            absolute_max_chars=120,
+            max_chunks=4,
+            max_total_chars=320,
+        )
+        chunks = chunker.feed(text)
+        chunks.extend(chunker.flush())
+        spoken = normalized(" ".join(chunks))
+        self.assertEqual(spoken, normalized(text))
+        self.assertIn("They just stood still... and let the clock run out.", spoken)
+        self.assertFalse(any(chunk.endswith("and") for chunk in chunks))
+
 
 if __name__ == "__main__":
     unittest.main()

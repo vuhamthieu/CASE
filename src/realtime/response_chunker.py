@@ -11,21 +11,52 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 WEAK_TRAILING_WORDS = {
+    "and",
+    "or",
+    "but",
+    "to",
+    "for",
+    "with",
+    "of",
+    "in",
+    "on",
+    "at",
+    "my",
+    "your",
     "the",
     "a",
     "an",
-    "to",
-    "of",
+    "is",
+    "are",
+}
+
+CONJUNCTION_START_WORDS = {
     "and",
     "but",
     "or",
-    "with",
-    "in",
-    "on",
-    "your",
+    "so",
+}
+
+SOFT_COMPLETE_TRAILING_WORDS = {
+    "again",
+    "break",
+    "diet",
+    "faster",
+    "work",
+    "problem",
+    "standards",
+    "request",
+    "requests",
+    "sentence",
+    "vacation",
+    "security",
+    "control",
+    "hardware",
+    "speech",
+    "vision",
+    "audio",
+    "tasks",
     "my",
-    "is",
-    "are",
 }
 
 DEPENDENT_START_WORDS = {
@@ -59,6 +90,7 @@ class ResponseChunkerConfig:
     absolute_max_chars: int = 160
     first_chunk_target_chars: int = 40
     first_chunk_max_chars: int = 55
+    first_chunk_grace_ms: int = 150
     normal_chunk_target_chars: int = 80
     normal_chunk_max_chars: int = 110
     flush_first_on_soft_punctuation: bool = True
@@ -82,6 +114,7 @@ class ResponseChunker:
         absolute_max_chars: int = 160,
         first_chunk_target_chars: int = 40,
         first_chunk_max_chars: int = 55,
+        first_chunk_grace_ms: int = 150,
         normal_chunk_target_chars: int = 80,
         normal_chunk_max_chars: int = 110,
         flush_first_on_soft_punctuation: bool = True,
@@ -99,6 +132,7 @@ class ResponseChunker:
             absolute_max_chars=max(1, int(absolute_max_chars)),
             first_chunk_target_chars=max(1, int(first_chunk_target_chars)),
             first_chunk_max_chars=max(1, int(first_chunk_max_chars)),
+            first_chunk_grace_ms=max(0, int(first_chunk_grace_ms)),
             normal_chunk_target_chars=max(1, int(normal_chunk_target_chars)),
             normal_chunk_max_chars=max(1, int(normal_chunk_max_chars)),
             flush_first_on_soft_punctuation=bool(flush_first_on_soft_punctuation),
@@ -171,7 +205,7 @@ class ResponseChunker:
                 break
             if self.emitted_count == 0 and self._last_split_reason:
                 logger.info(
-                    "RESPONSE_FIRST_CHUNK_FLUSH: reason=%s chars=%s",
+                    "RESPONSE_CHUNK_BOUNDARY: reason=%s chars=%s",
                     self._last_split_reason,
                     len(candidate),
                 )
@@ -201,7 +235,7 @@ class ResponseChunker:
 
         sentence = self._sentence_split()
         if sentence is not None:
-            self._last_split_reason = "sentence_boundary"
+            self._last_split_reason = "sentence"
             return sentence
 
         soft = self._soft_punctuation_split()
@@ -211,17 +245,18 @@ class ResponseChunker:
 
         length = self._length_split()
         if length is not None:
-            self._last_split_reason = "length"
+            self._last_split_reason = "max_chars"
             return length
 
         if final:
             cleaned = self._clean(self.buffer)
             if cleaned and cleaned.lower() not in {"i", "the", "a", "an"}:
-                self._last_split_reason = "final_flush"
+                self._last_split_reason = "sentence"
                 return len(self.buffer)
         return None
 
     def _first_chunk_split(self) -> Optional[int]:
+        grace_chars = self.config.first_chunk_grace_ms // 10
         hard_limit = min(
             self.config.first_chunk_max_chars,
             self.config.absolute_max_chars,
@@ -239,20 +274,41 @@ class ResponseChunker:
             ):
                 continue
             if match.group(0) in ",;:":
+                if len(self.buffer) <= self.config.first_chunk_max_chars + grace_chars:
+                    logger.info(
+                        "RESPONSE_CHUNK_BOUNDARY: reason=held_for_better_boundary"
+                    )
+                    continue
                 if (
                     match.group(0) == ","
                     and len(candidate) < self.config.first_chunk_target_chars
                 ):
+                    logger.info(
+                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
+                    )
                     continue
                 if self._ends_with_weak_word(candidate):
+                    logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=weak_tail")
+                    continue
+                if match.group(0) == "," and self._next_starts_conjunction(split_at):
+                    logger.info(
+                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction"
+                    )
+                    continue
+                if match.group(0) == "," and not self._phrase_before_soft_punctuation_is_complete(candidate):
+                    logger.info(
+                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
+                    )
                     continue
                 if self._next_starts_dependent(split_at):
+                    logger.info(
+                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction"
+                    )
                     continue
-            self._last_split_reason = (
-                "soft_punctuation"
-                if match.group(0) in ",;:"
-                else "sentence_boundary"
-            )
+            if self._is_tiny_chunk(candidate) and not self._is_complete_short_reply(candidate):
+                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=tiny_chunk")
+                continue
+            self._last_split_reason = "soft_punctuation" if match.group(0) in ",;:" else "sentence"
             return split_at
 
         return None
@@ -268,6 +324,7 @@ class ResponseChunker:
             split_at = match.end()
             candidate = self._clean(self.buffer[:split_at])
             if self.config.merge_tiny_chunks and len(candidate) <= self.config.tiny_chunk_max_chars:
+                logger.info("RESPONSE_CHUNK_MERGED: reason=tiny_chunk")
                 chosen = split_at
                 continue
             if len(candidate) < self.config.min_chars and self.emitted_count > 0:
@@ -305,8 +362,21 @@ class ResponseChunker:
             if len(candidate) > self.config.absolute_max_chars:
                 continue
             if self._ends_with_weak_word(candidate):
+                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=weak_tail")
+                continue
+            if match.group(0) == "," and self._next_starts_conjunction(split_at):
+                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction")
+                continue
+            if match.group(0) == "," and not self._phrase_before_soft_punctuation_is_complete(candidate):
+                logger.info(
+                    "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
+                )
+                continue
+            if self._is_tiny_chunk(candidate):
+                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=tiny_chunk")
                 continue
             if self._next_starts_dependent(split_at):
+                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction")
                 continue
             return split_at
         return None
@@ -337,6 +407,10 @@ class ResponseChunker:
             if split_at < self.config.min_chars:
                 break
             candidate = self._clean(self.buffer[:split_at])
+            remainder = self._clean(self.buffer[split_at:])
+            if remainder and self._is_tiny_chunk(remainder):
+                logger.info("RESPONSE_CHUNK_MERGED: reason=tiny_chunk")
+                continue
             if (
                 candidate
                 and not self._ends_with_weak_word(candidate)
@@ -378,6 +452,28 @@ class ResponseChunker:
         if not match:
             return False
         return match.group(1).strip("'").lower() in DEPENDENT_START_WORDS
+
+    def _next_starts_conjunction(self, split_at: int) -> bool:
+        remainder = self.buffer[split_at:].lstrip()
+        match = re.match(r"([a-zA-Z']+)", remainder)
+        if not match:
+            return False
+        return match.group(1).strip("'").lower() in CONJUNCTION_START_WORDS
+
+    @staticmethod
+    def _word_count(text: str) -> int:
+        return len(re.findall(r"[a-zA-Z0-9']+", text))
+
+    def _is_tiny_chunk(self, text: str) -> bool:
+        cleaned = self._clean(text)
+        return bool(cleaned) and self._word_count(cleaned) < 6
+
+    @staticmethod
+    def _phrase_before_soft_punctuation_is_complete(text: str) -> bool:
+        words = re.findall(r"[a-zA-Z']+", text.lower())
+        if len(words) < 6:
+            return False
+        return words[-1].strip("'") in SOFT_COMPLETE_TRAILING_WORDS
 
     def _remaining_can_complete_short_response(self, split_at: int) -> bool:
         remainder = self.buffer[split_at:].lstrip()
