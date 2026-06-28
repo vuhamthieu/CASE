@@ -768,7 +768,22 @@ class CASEPersonality:
 
         chunks = [text]
         if int(metrics.get("tts_chunks_accepted", 0)) == 0 and len(text) > CASE_TTS_FIRST_CHUNK_MAX_CHARS:
-            chunks = self._split_first_chunk_after_safe_text(text)
+            candidate_chunks = self._split_first_chunk_after_safe_text(text)
+            if metrics.get("realtime_hybrid") and CASE_TTS_DROP_OVERFLOW_IN_REALTIME:
+                accepted = int(metrics.get("tts_chunks_accepted", 0))
+                max_chunks = int(metrics.get("max_tts_chunks", CASE_TTS_REALTIME_MAX_CHUNKS))
+                remaining_chunks = max(0, max_chunks - accepted)
+            else:
+                remaining_chunks = len(candidate_chunks)
+            if len(candidate_chunks) > remaining_chunks:
+                logger.info(
+                    "RESPONSE_CHUNK_RESPLIT_SKIPPED: reason=chunk_budget "
+                    "chunks=%s remaining=%s",
+                    len(candidate_chunks),
+                    remaining_chunks,
+                )
+            else:
+                chunks = candidate_chunks
             if len(chunks) > 1:
                 logger.info(
                     "RESPONSE_CHUNK_RESPLIT_AFTER_SAFE_TEXT: original_chars=%s safe_chars=%s",

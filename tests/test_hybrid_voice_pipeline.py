@@ -191,6 +191,31 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(chunks[0]), defaults.CASE_TTS_FIRST_CHUNK_MAX_CHARS)
         self.assertNotIn("trivial.", chunks[0:0])
 
+    async def test_resplit_preserves_tail_when_only_one_chunk_slot_remains(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        metrics = {
+            "realtime_hybrid": True,
+            "allow_long_answer": False,
+            "max_spoken_chars": 420,
+            "max_tts_chunks": 1,
+            "user_text": "why was it a failure",
+        }
+        text = (
+            "It was a failure because they just stood still and let the clock run out."
+        )
+        queued = await personality._queue_stream_chunk(5, 0, text, metrics)
+        chunks = [
+            payload["text"]
+            for topic, payload in bus.events
+            if topic == "AI_SPEAK_STREAM_CHUNK"
+        ]
+        self.assertEqual(queued, 1)
+        self.assertEqual(chunks, [text])
+        self.assertEqual(" ".join(chunks), text)
+        self.assertIn("let the clock run out.", chunks[0])
+
     def test_realtime_plain_chat_does_not_dispatch_actions(self):
         self.assertFalse(CASEPersonality._should_dispatch_action(True, "ROTATE_RIGHT"))
         self.assertFalse(CASEPersonality._should_dispatch_action(True, "LED_BLINK"))
