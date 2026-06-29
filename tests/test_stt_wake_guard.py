@@ -189,11 +189,38 @@ class SttWakeGuardTests(unittest.TestCase):
 
     def test_embedded_followup_command_is_repaired_and_accepted(self):
         engine = make_engine()
-        repaired = engine._repair_transcript(
+        processed = engine._process_transcript(
             "the i very from can you tell me something funny"
         )
-        self.assertEqual(repaired, "can you tell me something funny")
-        self.assertIsNone(engine._transcript_reject_reason(repaired, followup=True))
+        self.assertEqual(
+            processed.repaired_text,
+            "the i very from can you tell me something funny",
+        )
+        self.assertEqual(processed.intent_text, "can you tell me something funny")
+        self.assertIsNone(
+            engine._transcript_reject_reason(processed.repaired_text, followup=True)
+        )
+
+    def test_embedded_command_preserves_user_text_for_display(self):
+        engine = make_engine()
+        processed = engine._process_transcript("can you tell me a joke")
+        self.assertEqual(processed.raw_text, "can you tell me a joke")
+        self.assertEqual(processed.repaired_text, "can you tell me a joke")
+        self.assertEqual(processed.intent_text, "tell me a joke")
+
+    def test_domain_glossary_repair_feeds_user_spoke_text(self):
+        engine = make_engine()
+        processed = engine._process_transcript("do you know g p a six")
+        self.assertEqual(processed.raw_text, "do you know g p a six")
+        self.assertEqual(processed.repaired_text, "do you know GTA 6")
+        self.assertIsNone(processed.intent_text)
+        self.assertEqual(processed.repair_reason, "domain_glossary")
+
+    def test_gpa_academic_question_is_not_domain_repaired(self):
+        engine = make_engine()
+        processed = engine._process_transcript("what is my GPA")
+        self.assertEqual(processed.repaired_text, "what is my GPA")
+        self.assertIsNone(processed.intent_text)
 
     def test_phonetic_task_followups_repair_and_accept(self):
         engine = make_engine()

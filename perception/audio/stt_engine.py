@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -30,6 +31,8 @@ from src.config.env import get_bool, get_str
 from src.realtime.realtime_config import (
     CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT,
     CASE_STT_FINAL_BACKEND,
+    CASE_STT_GLOSSARY_PATH,
+    CASE_STT_GLOSSARY_REPAIR,
     CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC,
     CASE_STT_PROFILE,
     GTCRN_MODEL_PATH,
@@ -56,6 +59,7 @@ from src.realtime.realtime_config import (
     VOSK_LGRAPH_MODEL_PATH,
     VOSK_SMALL_MODEL_PATH,
 )
+from src.stt_backends.domain_glossary import DomainGlossary, load_domain_glossary
 from src.stt_backends.sherpa_sensevoice_backend import SherpaSenseVoiceBackend
 from src.stt_backends.smart_turn import SmartTurnDetector, has_weak_ending
 from src.stt_backends.stt_profile import resolve_stt_profile
@@ -118,6 +122,15 @@ WAKE_STRONG_THRESHOLD = 0.998
 WAKE_MIN_HITS = 3
 WAKE_HIT_WINDOW_SEC = 0.7
 WAKE_COOLDOWN_SEC = 2.0
+
+
+@dataclass(frozen=True)
+class ProcessedTranscript:
+    raw_text: str
+    repaired_text: str
+    intent_text: str | None = None
+    repair_reason: str | None = None
+    domain_canonical: str | None = None
 WAKE_DISABLE_DURING_TTS = get_bool("WAKE_DISABLE_DURING_TTS", True)
 WAKE_POST_TTS_COOLDOWN_SEC = _env_float("WAKE_POST_TTS_COOLDOWN_SEC", 3.0)
 WAKE_POST_WAKE_ACK_COOLDOWN_SEC = _env_float("WAKE_POST_WAKE_ACK_COOLDOWN_SEC", 0.5)
@@ -433,6 +446,13 @@ class STTEngine:
         )
         self.accept_fast_candidate_on_timeout = (
             CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT
+        )
+        self.glossary_repair_enabled = CASE_STT_GLOSSARY_REPAIR
+        self.glossary_path = self._resolve_path(CASE_STT_GLOSSARY_PATH)
+        self.domain_glossary: DomainGlossary | None = (
+            load_domain_glossary(self.glossary_path)
+            if self.glossary_repair_enabled
+            else None
         )
         self.wakeword_model_path = self._resolve_path(wakeword_model_path)
         self.samplerate = samplerate
@@ -1129,35 +1149,99 @@ class STTEngine:
 
         return None
 
-    def _repair_transcript(self, text: str) -> str:
+    def _get_domain_glossary(self) -> DomainGlossary | None:
+        if not getattr(self, "glossary_repair_enabled", CASE_STT_GLOSSARY_REPAIR):
+            return None
+        glossary = getattr(self, "domain_glossary", None)
+        if glossary is not None:
+            return glossary
+        repo_root = getattr(self, "repo_root", Path(__file__).resolve().parents[2])
+        path = getattr(self, "glossary_path", repo_root / CASE_STT_GLOSSARY_PATH)
+        if not isinstance(path, Path):
+            path = Path(path)
+        if not path.is_absolute():
+            path = repo_root / path
+        glossary = load_domain_glossary(path)
+        self.domain_glossary = glossary
+        return glossary
+
+    def _process_transcript(self, text: str) -> ProcessedTranscript:
+        raw_text = str(text).strip()
+        logging.info("TRANSCRIPT_RAW: text=%r", raw_text)
+        repaired_text = raw_text
+        repair_reason: str | None = None
+        domain_canonical: str | None = None
+
+        glossary = self._get_domain_glossary()
+        if glossary is not None:
+            domain_repaired, match = glossary.repair(repaired_text)
+            if match is not None and domain_repaired != repaired_text:
+                logging.info(
+                    "TRANSCRIPT_DOMAIN_REPAIR: original=%r repaired=%r "
+                    "reason=domain_glossary canonical=%r",
+                    repaired_text,
+                    domain_repaired,
+                    match.canonical,
+                )
+                repaired_text = domain_repaired
+                repair_reason = "domain_glossary"
+                domain_canonical = match.canonical
+
         repaired, reason = repair_common_transcript(
-            text,
+            repaired_text,
             recent_context=self._last_published_transcript,
         )
+        intent_text: str | None = None
         if reason:
-            if reason in {
-                "embedded_known_command",
-                "phonetic_followup_repair",
-                "banter_phonetic_repair",
-            }:
+            if reason == "embedded_known_command":
+                intent_text = repaired
+                repair_reason = repair_reason or reason
                 logging.info(
-                    "FOLLOWUP_REPAIR: original=%r repaired=%r reason=%s",
-                    text,
-                    repaired,
+                    "TRANSCRIPT_INTENT_CANONICALIZE: raw=%r intent=%r reason=%s",
+                    repaired_text,
+                    intent_text,
                     reason,
                 )
-                return repaired
-            logging.info(
-                "TRANSCRIPT_REPAIR: before=%r after=%r reason=%s",
-                text,
-                repaired,
-                reason,
-            )
-            return repaired
-        return repaired
+            else:
+                if reason in {"phonetic_followup_repair", "banter_phonetic_repair"}:
+                    logging.info(
+                        "FOLLOWUP_REPAIR: original=%r repaired=%r reason=%s",
+                        repaired_text,
+                        repaired,
+                        reason,
+                    )
+                else:
+                    logging.info(
+                        "TRANSCRIPT_REPAIR: before=%r after=%r reason=%s",
+                        repaired_text,
+                        repaired,
+                        reason,
+                    )
+                repaired_text = repaired
+                repair_reason = reason
+
+        logging.info(
+            "TRANSCRIPT_FINAL_TEXT: text=%r source=repaired_text",
+            repaired_text,
+        )
+        return ProcessedTranscript(
+            raw_text=raw_text,
+            repaired_text=repaired_text,
+            intent_text=intent_text,
+            repair_reason=repair_reason,
+            domain_canonical=domain_canonical,
+        )
+
+    def _repair_transcript(self, text: str) -> str:
+        return self._process_transcript(text).repaired_text
+
+    def _intent_text_for_transcript(self, text: str) -> str:
+        processed = self._process_transcript(text)
+        return processed.intent_text or processed.repaired_text
 
     def _publish_user_spoke(self, text: str, *, followup: bool = False) -> bool:
-        text = self._repair_transcript(text)
+        processed = self._process_transcript(text)
+        text = processed.repaired_text
         before_dedupe = text.strip()
         text = dedupe_repeated_transcript(before_dedupe)
         if text != before_dedupe:
@@ -1178,6 +1262,10 @@ class STTEngine:
                 **self._session_turn_metrics,
                 **self._last_transcript_metrics,
                 "transcript_final_at": time.monotonic(),
+                "transcript_raw_text": processed.raw_text,
+                "transcript_repaired_text": text,
+                "transcript_intent_text": processed.intent_text or "",
+                "transcript_repair_reason": processed.repair_reason or "",
             }
             metrics_coroutine = self.bus.publish("TURN_METRICS", turn_metrics)
             coroutine = self.bus.publish("USER_SPOKE", text)

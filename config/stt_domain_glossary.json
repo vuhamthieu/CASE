@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "terms": [
+    {
+      "canonical": "GTA 6",
+      "patterns": [
+        "g p a six",
+        "gpa 6",
+        "g p a 6",
+        "gta six",
+        "g t a six",
+        "g t a 6",
+        "grand theft auto six",
+        "grand theft auto 6"
+      ],
+      "negative_context": [
+        "grade point average",
+        "my gpa",
+        "calculate gpa",
+        "school gpa",
+        "college gpa"
+      ]
+    },
+    {
+      "canonical": "Grand Theft Auto",
+      "patterns": [
+        "point cheap alto",
+        "grand theft auto",
+        "grand theft auto game"
+      ],
+      "negative_context": []
+    },
+    {
+      "canonical": "ESP32",
+      "patterns": [
+        "e s p thirty two",
+        "esp thirty two",
+        "e s p 32",
+        "esp 32"
+      ],
+      "negative_context": []
+    },
+    {
+      "canonical": "PCA9685",
+      "patterns": [
+        "p c a nine six eight five",
+        "pca nine six eight five",
+        "p c a 9685",
+        "pca 9685"
+      ],
+      "negative_context": []
+    },
+    {
+      "canonical": "Raspberry Pi",
+      "patterns": [
+        "raspberry pie",
+        "raspberry pi",
+        "rasp berry pi"
+      ],
+      "negative_context": []
+    }
+  ]
+}
