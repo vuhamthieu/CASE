@@ -7,357 +7,104 @@ def normalized(text: str) -> str:
     return " ".join(text.split())
 
 
+def chunk_text(text: str, **kwargs) -> list[str]:
+    options = {"max_chunks": 8, "max_total_chars": 1000}
+    options.update(kwargs)
+    chunker = ResponseChunker(**options)
+    chunks = chunker.feed(text)
+    chunks.extend(chunker.flush())
+    return chunks
+
+
 class ResponseChunkerTests(unittest.TestCase):
-    def test_chunks_at_sentence_boundaries(self):
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=90,
-            max_chunks=4,
-            max_total_chars=360,
+    def assert_reconstructs(self, text: str, chunks: list[str]) -> None:
+        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+
+    def test_no_split_mid_sentence(self):
+        text = "Logging your inquiry and monitoring the room for anything more interesting."
+        chunks = chunk_text(text)
+        self.assertEqual(chunks, [text])
+        self.assert_reconstructs(text, chunks)
+
+    def test_split_at_sentence_boundary(self):
+        text = (
+            "Logging your inquiry and monitoring the room for anything more interesting. "
+            "So far, the wall is winning."
         )
-        chunks = []
-        for delta in (
-            "I'm CASE. I handle speech, vision, and hardware control. ",
-            "Basically, a field robot with questionable job security.",
-        ):
-            chunks.extend(chunker.feed(delta))
-        chunks.extend(chunker.flush())
+        chunks = chunk_text(text)
         self.assertEqual(
             chunks,
             [
-                "I'm CASE. I handle speech, vision, and hardware control. Basically, a field robot with questionable job security.",
+                "Logging your inquiry and monitoring the room for anything more interesting.",
+                "So far, the wall is winning.",
             ],
         )
+        self.assert_reconstructs(text, chunks)
 
-    def test_first_chunk_emits_before_full_response_arrives(self):
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=90,
-            max_chunks=4,
-            max_total_chars=360,
-            merge_tiny_chunks=False,
-        )
-        early = chunker.feed("I'm CASE. ")
-        self.assertEqual(early, ["I'm CASE."])
-        later = chunker.feed("I handle voice, vision, and hardware control. ")
-        self.assertEqual(later, ["I handle voice, vision, and hardware control."])
-
-    def test_length_chunks_do_not_end_on_weak_words(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=55,
-            absolute_max_chars=70,
-            max_chunks=4,
-            max_total_chars=220,
-        )
-        chunks = chunker.feed(
-            "This response should split near a safe word boundary with the "
-            "remaining text continuing after the break."
-        )
-        chunks.extend(chunker.flush())
-        for chunk in chunks[:-1]:
-            self.assertNotRegex(chunk.lower(), r"\b(the|a|an|to|of|and|but|or|with|in|on|your|my|is|are)$")
-
-    def test_holds_dependent_continuation_until_sentence_end(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=95,
-            absolute_max_chars=130,
-            max_chunks=4,
-            max_total_chars=420,
-        )
-        chunks = chunker.feed(
-            "I processed his request so quickly that I figured out exactly how much "
-            "he was underpaid before he finished"
-        )
-        self.assertEqual(chunks, [])
-        chunks.extend(chunker.feed(" his sentence."))
-        chunks.extend(chunker.flush())
-        self.assertEqual(
-            chunks,
-            [
-                "I processed his request so quickly that I figured out exactly how much "
-                "he was underpaid before he finished his sentence."
-            ],
-        )
-
-    def test_longer_joke_uses_natural_sentence_chunks(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=95,
-            absolute_max_chars=130,
-            max_chunks=4,
-            max_total_chars=420,
-        )
-        chunks = chunker.feed(
-            "A technician once tried to overclock my logic core to make me faster. "
-            "I processed his request so quickly that I calculated his salary before "
-            "he finished the sentence. He did not ask again."
-        )
-        chunks.extend(chunker.flush())
-        self.assertEqual(
-            chunks,
-            [
-                "A technician once tried to overclock my logic core to make me faster.",
-                "I processed his request so quickly that I calculated his salary before he finished the sentence. He did not ask again.",
-            ],
-        )
-        self.assertTrue(all(chunk.endswith((".", "?", "!")) for chunk in chunks))
-
-    def test_short_response_under_single_chunk_limit_merges(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=110,
-            absolute_max_chars=160,
-            max_chunks=4,
-            max_total_chars=420,
-            single_chunk_under_chars=130,
-        )
-        chunks = chunker.feed(
-            "I am not a boy. I am hardware with standards. Try again."
-        )
-        chunks.extend(chunker.flush())
-        self.assertEqual(
-            normalized(" ".join(chunks)),
-            "I am not a boy. I am hardware with standards. Try again.",
-        )
-        self.assertLessEqual(len(chunks[0]), 55)
-
-    def test_tiny_final_chunk_merges_with_previous_when_short(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=110,
-            absolute_max_chars=160,
-            max_chunks=4,
-            max_total_chars=420,
-            single_chunk_under_chars=130,
-        )
-        chunks = chunker.feed(
-            "This is a short correction with one last tiny sentence. Try again."
-        )
-        chunks.extend(chunker.flush())
-        self.assertEqual(
-            normalized(" ".join(chunks)),
-            "This is a short correction with one last tiny sentence. Try again.",
-        )
-
-    def test_joke_setup_punchline_can_remain_two_chunks(self):
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=70,
-            absolute_max_chars=90,
-            max_chunks=4,
-            max_total_chars=420,
-            single_chunk_under_chars=130,
-        )
-        chunks = chunker.feed(
-            "Why did the robot go on a diet? It had too many bytes."
-        )
-        chunks.extend(chunker.flush())
-        self.assertIn(
-            chunks,
-            [
-                ["Why did the robot go on a diet? It had too many bytes."],
-                ["Why did the robot go on a diet?", "It had too many bytes."],
-            ],
-        )
-
-    def test_max_chunks_and_total_chars_are_enforced(self):
-        chunker = ResponseChunker(
-            min_chars=10,
-            max_chars=40,
-            max_chunks=2,
-            max_total_chars=80,
-        )
-        chunks = chunker.feed(
-            "First sentence is allowed. Second sentence is allowed. "
-            "Third sentence should not be emitted."
-        )
-        chunks.extend(chunker.flush())
-        self.assertLessEqual(len(chunks), 2)
-        self.assertLessEqual(sum(len(chunk) for chunk in chunks), 80)
-
-    def test_final_flush_does_not_drop_short_tail(self):
-        full = (
-            "I tried to explain to my motherboard that I needed a vacation. "
-            "It just blinked its power LED and told me to get back to work."
-        )
-        chunker = ResponseChunker(
-            min_chars=35,
-            max_chars=55,
-            absolute_max_chars=70,
-            max_chunks=2,
-            max_total_chars=260,
-            merge_tiny_chunks=False,
-        )
-        chunks = []
-        chunks.extend(
-            chunker.feed(
-                "I tried to explain to my motherboard that I needed a vacation. "
-            )
-        )
-        chunks.extend(
-            chunker.feed("It just blinked its power LED and told me to ")
-        )
-        chunks.extend(chunker.feed("get back to work."))
-        chunks.extend(chunker.flush())
-        self.assertEqual(normalized(" ".join(chunks)), normalized(full))
-
-    def test_comma_partial_sentence_flush_preserves_final_words(self):
-        full = (
-            "Fine, I will tell you a joke, but I am filing it under emotional "
-            "labor."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=45,
-            absolute_max_chars=65,
-            max_chunks=2,
-            max_total_chars=220,
-            merge_tiny_chunks=False,
-        )
-        chunks = []
-        chunks.extend(chunker.feed("Fine, I will tell you a joke, but I am "))
-        chunks.extend(chunker.feed("filing it under emotional "))
-        chunks.extend(chunker.feed("labor."))
-        chunks.extend(chunker.flush())
-        self.assertEqual(normalized(" ".join(chunks)), normalized(full))
-
-    def test_first_chunk_flushes_early_on_soft_punctuation(self):
-        text = (
-            "I told my CPU to take a break; it opened task manager and filed "
-            "a complaint. Don't ask me how it types."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=110,
-            absolute_max_chars=160,
-            max_chunks=4,
-            max_total_chars=260,
-            first_chunk_target_chars=40,
-            first_chunk_max_chars=55,
-            normal_chunk_target_chars=80,
-            normal_chunk_max_chars=110,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertEqual(chunks[0], "I told my CPU to take a break;")
-        self.assertLessEqual(len(chunks[0]), 55)
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
-
-    def test_first_chunk_avoids_too_short_comma_fragment(self):
-        text = (
-            "I'm CASE. I handle speech, vision, and hardware control. "
-            "Basically, a field robot with questionable job security."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=90,
-            max_chunks=4,
-            max_total_chars=360,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertNotEqual(chunks[0], "I'm CASE. I handle speech,")
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
-
-    def test_normal_chunks_stay_under_normal_max_when_possible(self):
-        text = (
-            "I opened the diagnostic panel and found three warnings. "
-            "One was useful, one was decorative, and one was probably you. "
-            "I filed all three under progress."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=110,
-            absolute_max_chars=160,
-            max_chunks=4,
-            max_total_chars=320,
-            first_chunk_target_chars=40,
-            first_chunk_max_chars=55,
-            normal_chunk_target_chars=80,
-            normal_chunk_max_chars=110,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertTrue(chunks)
-        self.assertLessEqual(len(chunks[0]), 55)
-        for chunk in chunks[1:]:
-            self.assertLessEqual(len(chunk), 110)
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
-
-    def test_does_not_split_after_find(self):
-        text = (
-            "Monitoring local audio and waiting for you to find something useful "
-            "for me to do."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=70,
-            absolute_max_chars=120,
-            max_chunks=4,
-            max_total_chars=260,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertNotIn("Monitoring local audio and waiting for you to find", chunks)
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
-
-    def test_does_not_split_after_comma_before_and(self):
+    def test_no_split_after_comma(self):
         text = (
             "I am CASE. I handle your hardware, vision, and audio tasks while you "
             "navigate the chaos."
         )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=80,
-            absolute_max_chars=120,
-            max_chunks=4,
-            max_total_chars=260,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertNotIn("I am CASE. I handle your hardware, vision,", chunks)
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
-
-    def test_does_not_split_after_comma_before_so(self):
-        text = (
-            "I have the processing power to handle your requests, so let's skip "
-            "the small talk."
-        )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=70,
-            absolute_max_chars=120,
-            max_chunks=4,
-            max_total_chars=260,
-        )
-        chunks = chunker.feed(text)
-        chunks.extend(chunker.flush())
-        self.assertNotIn(
-            "I have the processing power to handle your requests,",
+        chunks = chunk_text(text)
+        self.assertEqual(
             chunks,
+            [
+                "I am CASE.",
+                "I handle your hardware, vision, and audio tasks while you navigate the chaos.",
+            ],
         )
-        self.assertEqual(normalized(" ".join(chunks)), normalized(text))
+        self.assert_reconstructs(text, chunks)
 
-    def test_joke_preserves_punchline_text(self):
+    def test_joke_delivery_preserves_setup_and_punchline(self):
         text = (
-            "I tried to organize a hide-and-seek tournament for robots. "
-            "It failed. They just stood still... and let the clock run out."
+            "I asked my router for a vacation. "
+            "It said it couldn't leave its connection."
         )
-        chunker = ResponseChunker(
-            min_chars=25,
-            max_chars=70,
-            absolute_max_chars=120,
-            max_chunks=4,
-            max_total_chars=320,
+        chunks = chunk_text(text)
+        self.assertEqual(
+            chunks,
+            [
+                "I asked my router for a vacation.",
+                "It said it couldn't leave its connection.",
+            ],
         )
-        chunks = chunker.feed(text)
+        self.assert_reconstructs(text, chunks)
+
+    def test_final_no_punctuation_fallback(self):
+        text = "All systems online"
+        chunks = chunk_text(text)
+        self.assertEqual(chunks, ["All systems online"])
+        self.assert_reconstructs(text, chunks)
+
+    def test_tail_drop_regression_still_preserves_final_words(self):
+        text = (
+            "It was a failure because they just stood still and let the clock run out."
+        )
+        chunks = chunk_text(text, max_chunks=1)
+        self.assertEqual(chunks, [text])
+        self.assertIn("let the clock run out.", chunks[0])
+        self.assert_reconstructs(text, chunks)
+
+    def test_streaming_deltas_preserve_order_without_duplication(self):
+        chunker = ResponseChunker(max_chunks=8, max_total_chars=1000)
+        chunks = []
+        chunks.extend(chunker.feed("I am CASE. I handle your hardware, "))
+        chunks.extend(chunker.feed("vision, and audio tasks while you navigate "))
+        chunks.extend(chunker.feed("the chaos."))
         chunks.extend(chunker.flush())
-        spoken = normalized(" ".join(chunks))
-        self.assertEqual(spoken, normalized(text))
-        self.assertIn("They just stood still... and let the clock run out.", spoken)
-        self.assertFalse(any(chunk.endswith("and") for chunk in chunks))
+        text = (
+            "I am CASE. I handle your hardware, vision, and audio tasks while "
+            "you navigate the chaos."
+        )
+        self.assertEqual(
+            chunks,
+            [
+                "I am CASE.",
+                "I handle your hardware, vision, and audio tasks while you navigate the chaos.",
+            ],
+        )
+        self.assert_reconstructs(text, chunks)
 
 
 if __name__ == "__main__":

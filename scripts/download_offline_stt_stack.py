@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit downloader for optional CASE offline speech models."""
+"""Explicit downloader for CASE offline speech artifacts."""
 
 from __future__ import annotations
 
@@ -13,6 +13,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "ai" / "stt"
+SILERO_VAD_URL = (
+    "https://raw.githubusercontent.com/snakers4/silero-vad/master/"
+    "src/silero_vad/data/silero_vad.onnx"
+)
+SILERO_VAD_RELATIVE_PATH = Path("ai/stt/silero_vad.onnx")
+SILERO_VAD_MIN_BYTES = 100 * 1024
 MODELS = {
     "vosk_lgraph": (
         "https://alphacephei.com/vosk/models/"
@@ -20,8 +26,7 @@ MODELS = {
         "vosk-model-en-us-0.22-lgraph.zip",
     ),
     "silero_vad": (
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-        "asr-models/silero_vad.onnx",
+        SILERO_VAD_URL,
         "silero_vad.onnx",
     ),
     "gtcrn": (
@@ -43,7 +48,96 @@ MODELS = {
 RECOMMENDED = ("vosk_lgraph", "silero_vad", "smart_turn")
 
 
+class InstallError(RuntimeError):
+    """Raised when a runtime artifact cannot be safely installed."""
+
+
+def _relative_to_root(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def silero_vad_path(root: Path = ROOT) -> Path:
+    return root / SILERO_VAD_RELATIVE_PATH
+
+
+def smart_turn_path(root: Path = ROOT) -> Path:
+    return root / "ai/stt/smart-turn-v3.2-cpu.onnx"
+
+
+def install_silero_vad(
+    *,
+    root: Path = ROOT,
+    force: bool = False,
+    urlopen=urllib.request.urlopen,
+    min_bytes: int = SILERO_VAD_MIN_BYTES,
+) -> Path:
+    target = silero_vad_path(root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size >= min_bytes and not force:
+        print(
+            "INSTALL_SILERO_VAD: installed "
+            f"path={_relative_to_root(target, root)} size={target.stat().st_size}"
+        )
+        return target
+
+    temporary = target.with_name(f".{target.name}.part")
+    if temporary.exists():
+        temporary.unlink()
+    print("INSTALL_SILERO_VAD: downloading")
+    try:
+        with urlopen(SILERO_VAD_URL) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        if not temporary.exists():
+            raise InstallError("download did not create a temp file")
+        size = temporary.stat().st_size
+        if size == 0:
+            raise InstallError("downloaded file is zero bytes")
+        if size < min_bytes:
+            raise InstallError(
+                f"downloaded file is too small: {size} bytes < {min_bytes} bytes"
+            )
+        temporary.replace(target)
+        print(
+            "INSTALL_SILERO_VAD: installed "
+            f"path={_relative_to_root(target, root)} size={size}"
+        )
+        return target
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        print("INSTALL_SILERO_VAD: failed")
+        raise
+
+
+def check_baseline(root: Path = ROOT) -> bool:
+    silero = silero_vad_path(root)
+    ok = silero.exists() and silero.stat().st_size > 0
+    status = "OK" if ok else "MISSING"
+    print(f"{status:<7} PROFILE_REQUIRED {_relative_to_root(silero, root)}")
+    if not smart_turn_path(root).exists():
+        print(
+            "OPTIONAL_smart_turn missing; CASE will use VAD/timing "
+            "turn-ending fallback."
+        )
+    return ok
+
+
+def install_baseline(*, root: Path = ROOT, force: bool = False) -> None:
+    install_silero_vad(root=root, force=force)
+    if not smart_turn_path(root).exists():
+        print(
+            "OPTIONAL_smart_turn missing; CASE will use VAD/timing "
+            "turn-ending fallback."
+        )
+
+
 def download(name: str, *, force: bool = False) -> None:
+    if name == "silero_vad":
+        install_silero_vad(force=force)
+        return
     url, filename = MODELS[name]
     DESTINATION.mkdir(parents=True, exist_ok=True)
     target = DESTINATION / filename
@@ -90,10 +184,25 @@ def main() -> None:
     )
     parser.add_argument("--model", choices=sorted(MODELS))
     parser.add_argument("--all-recommended", action="store_true")
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--install-baseline", action="store_true")
+    parser.add_argument("--install-silero-vad", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+    if args.check:
+        check_baseline()
+        return
+    if args.install_baseline:
+        install_baseline(force=args.force)
+        return
+    if args.install_silero_vad:
+        install_silero_vad(force=args.force)
+        return
     if not args.model and not args.all_recommended:
-        parser.error("choose --model or --all-recommended")
+        parser.error(
+            "choose --check, --install-baseline, --install-silero-vad, "
+            "--model, or --all-recommended"
+        )
     names = RECOMMENDED if args.all_recommended else (args.model,)
     for name in names:
         download(str(name), force=args.force)

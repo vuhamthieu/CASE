@@ -233,9 +233,11 @@ CASE_REALTIME_ALLOW_LONG_ANSWER_WHEN_ASKED = get_bool(
     "CASE_REALTIME_ALLOW_LONG_ANSWER_WHEN_ASKED",
     defaults.CASE_REALTIME_ALLOW_LONG_ANSWER_WHEN_ASKED,
 )
-CASE_TTS_CHUNK_POLICY = get_str(
-    "CASE_TTS_CHUNK_POLICY", defaults.CASE_TTS_CHUNK_POLICY
+CASE_TTS_CHUNK_MODE = get_str(
+    "CASE_TTS_CHUNK_MODE",
+    get_str("CASE_TTS_CHUNK_POLICY", defaults.CASE_TTS_CHUNK_MODE),
 ).lower()
+CASE_TTS_CHUNK_POLICY = CASE_TTS_CHUNK_MODE
 CASE_TTS_REALTIME_MODE = get_str(
     "CASE_TTS_REALTIME_MODE", defaults.CASE_TTS_REALTIME_MODE
 ).lower()
@@ -262,10 +264,6 @@ CASE_TTS_FIRST_CHUNK_TARGET_CHARS = get_int(
 CASE_TTS_FIRST_CHUNK_MAX_CHARS = get_int(
     "CASE_TTS_FIRST_CHUNK_MAX_CHARS",
     defaults.CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-)
-CASE_TTS_FIRST_CHUNK_GRACE_MS = get_int(
-    "CASE_TTS_FIRST_CHUNK_GRACE_MS",
-    defaults.CASE_TTS_FIRST_CHUNK_GRACE_MS,
 )
 CASE_TTS_NORMAL_CHUNK_TARGET_CHARS = get_int(
     "CASE_TTS_NORMAL_CHUNK_TARGET_CHARS",
@@ -463,13 +461,6 @@ CASE_TTS_CACHE_COMMON_PHRASES = get_bool(
 CASE_CHECK_PI_THROTTLE = get_bool(
     "CASE_CHECK_PI_THROTTLE", defaults.CASE_CHECK_PI_THROTTLE
 )
-EXPRESSIVE_TTS_PROVIDER = get_str(
-    "EXPRESSIVE_TTS_PROVIDER", defaults.EXPRESSIVE_TTS_PROVIDER
-).lower()
-ELEVENLABS_API_KEY = get_str("ELEVENLABS_API_KEY", defaults.ELEVENLABS_API_KEY)
-ELEVENLABS_VOICE_ID = get_str("ELEVENLABS_VOICE_ID", defaults.ELEVENLABS_VOICE_ID)
-CARTESIA_API_KEY = get_str("CARTESIA_API_KEY", defaults.CARTESIA_API_KEY)
-CARTESIA_VOICE_ID = get_str("CARTESIA_VOICE_ID", defaults.CARTESIA_VOICE_ID)
 CASE_VOICE_FX_ENABLED = get_bool(
     "CASE_VOICE_FX_ENABLED", defaults.CASE_VOICE_FX_ENABLED
 )
@@ -720,33 +711,16 @@ def resolve_voice_mode() -> str:
 
 
 def resolve_voice_pipeline() -> str:
-    """Return the usable pipeline; research mode is currently prototype-only."""
+    """Return the usable local voice pipeline."""
     if CASE_VOICE_PIPELINE not in {
         "gemini_live_native",
         "hybrid_text_tts",
-        "streaming_tts_research",
     }:
         logger.warning(
-            "Unknown CASE_VOICE_PIPELINE=%r; using gemini_live_native",
+            "Unknown CASE_VOICE_PIPELINE=%r; using hybrid_text_tts",
             CASE_VOICE_PIPELINE,
         )
-        return "gemini_live_native"
-    if CASE_VOICE_PIPELINE == "streaming_tts_research":
-        key_available = {
-            "elevenlabs": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
-            "cartesia": bool(CARTESIA_API_KEY and CARTESIA_VOICE_ID),
-        }.get(EXPRESSIVE_TTS_PROVIDER, False)
-        if not key_available:
-            logger.warning(
-                "Expressive TTS research provider %r is not configured; "
-                "falling back to gemini_live_native",
-                EXPRESSIVE_TTS_PROVIDER,
-            )
-            return "gemini_live_native"
-        logger.warning(
-            "streaming_tts_research is a prototype; using gemini_live_native runtime"
-        )
-        return "gemini_live_native"
+        return "hybrid_text_tts"
     if CASE_VOICE_PIPELINE == "hybrid_text_tts":
         if VOICE_OUTPUT_BACKEND == "piper_onnx":
             logger.info("PIPER_ONNX: active for CASE_TTS")

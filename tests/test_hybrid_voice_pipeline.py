@@ -143,7 +143,7 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, 0)
         self.assertEqual(len(chunks), 1)
 
-    async def test_first_chunk_max_enforced_after_safe_text(self):
+    async def test_sentence_mode_does_not_resplit_complete_sentence_after_safe_text(self):
         bus = FakeBus()
         personality = CASEPersonality.__new__(CASEPersonality)
         personality.message_bus = bus
@@ -164,9 +164,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
             for topic, payload in bus.events
             if topic == "AI_SPEAK_STREAM_CHUNK"
         ]
-        self.assertGreaterEqual(queued, 2)
-        self.assertLessEqual(len(chunks[0]), defaults.CASE_TTS_FIRST_CHUNK_MAX_CHARS)
-        self.assertEqual(" ".join(chunks), text)
+        self.assertEqual(queued, 1)
+        self.assertEqual(chunks, [text])
 
     async def test_resplit_skips_tiny_remainder(self):
         bus = FakeBus()
@@ -243,7 +242,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(defaults.CASE_REALTIME_REQUIRE_COMPLETE_SENTENCE)
         self.assertTrue(defaults.CASE_TTS_REQUIRE_SAFE_BOUNDARY)
         self.assertEqual(defaults.CASE_TTS_REALTIME_MODE, "streaming_chunks")
-        self.assertEqual(defaults.CASE_TTS_CHUNK_POLICY, "sentence_chunks")
+        self.assertEqual(defaults.CASE_TTS_CHUNK_MODE, "sentence")
+        self.assertEqual(defaults.CASE_TTS_CHUNK_POLICY, "sentence")
         self.assertEqual(defaults.CASE_TTS_CHUNK_MAX_CHARS, 110)
         self.assertEqual(defaults.CASE_TTS_CHUNK_MIN_CHARS, 35)
         self.assertTrue(defaults.CASE_TTS_MERGE_TINY_CHUNKS)

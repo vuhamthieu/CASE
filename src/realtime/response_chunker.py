@@ -1,110 +1,26 @@
-"""Streaming text chunker for CASE's Piper TTS pipeline."""
+"""Sentence-only streaming text chunker for CASE's Piper TTS pipeline."""
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
-
-
-logger = logging.getLogger(__name__)
-
-WEAK_TRAILING_WORDS = {
-    "and",
-    "or",
-    "but",
-    "to",
-    "for",
-    "with",
-    "of",
-    "in",
-    "on",
-    "at",
-    "my",
-    "your",
-    "the",
-    "a",
-    "an",
-    "is",
-    "are",
-}
-
-CONJUNCTION_START_WORDS = {
-    "and",
-    "but",
-    "or",
-    "so",
-}
-
-SOFT_COMPLETE_TRAILING_WORDS = {
-    "again",
-    "break",
-    "diet",
-    "faster",
-    "work",
-    "problem",
-    "standards",
-    "request",
-    "requests",
-    "sentence",
-    "vacation",
-    "security",
-    "control",
-    "hardware",
-    "speech",
-    "vision",
-    "audio",
-    "tasks",
-    "my",
-}
-
-DEPENDENT_START_WORDS = {
-    "before",
-    "after",
-    "because",
-    "while",
-    "when",
-    "if",
-    "that",
-    "which",
-    "who",
-    "where",
-    "until",
-}
-
-COMPLETE_SHORT_REPLIES = {
-    "yes.",
-    "no.",
-    "sure.",
-    "ok.",
-    "okay.",
-    "i'm here.",
-}
 
 
 @dataclass(frozen=True)
 class ResponseChunkerConfig:
-    min_chars: int = 35
-    max_chars: int = 110
-    absolute_max_chars: int = 160
-    first_chunk_target_chars: int = 40
-    first_chunk_max_chars: int = 55
-    first_chunk_grace_ms: int = 150
-    normal_chunk_target_chars: int = 80
-    normal_chunk_max_chars: int = 110
-    flush_first_on_soft_punctuation: bool = True
-    min_first_chunk_chars: int = 16
     max_chunks: int = 4
     max_total_chars: int = 360
-    prefer_sentence_boundary: bool = True
-    merge_tiny_chunks: bool = True
-    tiny_chunk_max_chars: int = 25
-    single_chunk_under_chars: int = 130
+    chunk_mode: str = "sentence"
 
 
 class ResponseChunker:
-    """Convert streamed LLM deltas into ordered TTS-safe text chunks."""
+    """Convert streamed LLM deltas into complete sentence TTS chunks.
+
+    The constructor keeps older size-policy arguments for compatibility, but
+    sentence mode deliberately ignores them for emission decisions. Piper gets a
+    chunk only when a full sentence is available, or when final flush has a
+    punctuation-less remainder.
+    """
 
     def __init__(
         self,
@@ -114,7 +30,6 @@ class ResponseChunker:
         absolute_max_chars: int = 160,
         first_chunk_target_chars: int = 40,
         first_chunk_max_chars: int = 55,
-        first_chunk_grace_ms: int = 150,
         normal_chunk_target_chars: int = 80,
         normal_chunk_max_chars: int = 110,
         flush_first_on_soft_punctuation: bool = True,
@@ -125,385 +40,66 @@ class ResponseChunker:
         merge_tiny_chunks: bool = True,
         tiny_chunk_max_chars: int = 25,
         single_chunk_under_chars: int = 130,
+        chunk_mode: str = "sentence",
     ) -> None:
         self.config = ResponseChunkerConfig(
-            min_chars=max(1, int(min_chars)),
-            max_chars=max(1, int(max_chars)),
-            absolute_max_chars=max(1, int(absolute_max_chars)),
-            first_chunk_target_chars=max(1, int(first_chunk_target_chars)),
-            first_chunk_max_chars=max(1, int(first_chunk_max_chars)),
-            first_chunk_grace_ms=max(0, int(first_chunk_grace_ms)),
-            normal_chunk_target_chars=max(1, int(normal_chunk_target_chars)),
-            normal_chunk_max_chars=max(1, int(normal_chunk_max_chars)),
-            flush_first_on_soft_punctuation=bool(flush_first_on_soft_punctuation),
-            min_first_chunk_chars=max(1, int(min_first_chunk_chars)),
             max_chunks=max(1, int(max_chunks)),
             max_total_chars=max(1, int(max_total_chars)),
-            prefer_sentence_boundary=bool(prefer_sentence_boundary),
-            merge_tiny_chunks=bool(merge_tiny_chunks),
-            tiny_chunk_max_chars=max(1, int(tiny_chunk_max_chars)),
-            single_chunk_under_chars=max(1, int(single_chunk_under_chars)),
+            chunk_mode=str(chunk_mode or "sentence").lower(),
         )
         self.buffer = ""
         self.emitted_count = 0
         self.emitted_chars = 0
-        self._last_split_reason = ""
 
     @property
     def exhausted(self) -> bool:
-        return (
-            self.emitted_count >= self.config.max_chunks
-            or self.emitted_chars >= self.config.max_total_chars
-        )
+        return False
 
     def feed(self, delta: str) -> list[str]:
         if not delta or self.exhausted:
             return []
         self.buffer += delta
-        return self._take_ready_chunks(final=False)
+        return self._take_sentence_chunks(final=False)
 
     def flush(self) -> list[str]:
         if self.exhausted:
             self.buffer = ""
             return []
-        return self._take_ready_chunks(final=True)
+        return self._take_sentence_chunks(final=True)
 
-    def _take_ready_chunks(self, *, final: bool) -> list[str]:
+    def _take_sentence_chunks(self, *, final: bool) -> list[str]:
         chunks: list[str] = []
-
         while not self.exhausted:
-            if final and self.emitted_count == self.config.max_chunks - 1:
-                split_at = len(self.buffer)
-                candidate = self._clean(self.buffer)
-                if not candidate:
-                    break
-                self.buffer = ""
-                candidate = self._fit_total_budget(candidate)
-                if not candidate:
-                    break
-                chunks.append(candidate)
-                self.emitted_count += 1
-                self.emitted_chars += len(candidate)
+            split_at = self._sentence_split()
+            if split_at is None:
+                if final:
+                    remainder = self._clean(self.buffer)
+                    self.buffer = ""
+                    if remainder:
+                        self._record_emit(remainder)
+                        chunks.append(remainder)
                 break
 
-            split_at = self._find_split(final=final)
-            if split_at is None:
-                break
             candidate = self._clean(self.buffer[:split_at])
-            if (
-                not final
-                and self.emitted_count == self.config.max_chunks - 1
-                and not candidate.endswith((".", "?", "!"))
-            ):
-                break
-            if final and self._should_hold_short_response(candidate):
-                split_at = len(self.buffer)
-                candidate = self._clean(self.buffer)
             self.buffer = self.buffer[split_at:].lstrip()
-            candidate = self._fit_total_budget(candidate)
             if not candidate:
                 break
-            if self.emitted_count == 0 and self._last_split_reason:
-                logger.info(
-                    "RESPONSE_CHUNK_BOUNDARY: reason=%s chars=%s",
-                    self._last_split_reason,
-                    len(candidate),
-                )
+            self._record_emit(candidate)
             chunks.append(candidate)
-            self.emitted_count += 1
-            self.emitted_chars += len(candidate)
 
         if self.exhausted:
             self.buffer = ""
-
         return chunks
 
-    def _find_split(self, *, final: bool) -> Optional[int]:
-        if not self.buffer.strip():
-            return None
-
-        self._last_split_reason = ""
-        if (
-            not final
-            and
-            self.emitted_count == 0
-            and self.config.flush_first_on_soft_punctuation
-        ):
-            first_split = self._first_chunk_split()
-            if first_split is not None:
-                return first_split
-
-        sentence = self._sentence_split()
-        if sentence is not None:
-            self._last_split_reason = "sentence"
-            return sentence
-
-        soft = self._soft_punctuation_split()
-        if soft is not None:
-            self._last_split_reason = "soft_punctuation"
-            return soft
-
-        length = self._length_split()
-        if length is not None:
-            self._last_split_reason = "max_chars"
-            return length
-
-        if final:
-            cleaned = self._clean(self.buffer)
-            if cleaned and cleaned.lower() not in {"i", "the", "a", "an"}:
-                self._last_split_reason = "sentence"
-                return len(self.buffer)
-        return None
-
-    def _first_chunk_split(self) -> Optional[int]:
-        grace_chars = self.config.first_chunk_grace_ms // 10
-        hard_limit = min(
-            self.config.first_chunk_max_chars,
-            self.config.absolute_max_chars,
-        )
-        for match in re.finditer(r"[.!?;:,](?=\s|$)", self.buffer):
-            split_at = match.end()
-            candidate = self._clean(self.buffer[:split_at])
-            if not candidate:
-                continue
-            if len(candidate) > hard_limit:
-                break
-            if (
-                len(candidate) < self.config.min_first_chunk_chars
-                and not self._is_complete_short_reply(candidate)
-            ):
-                continue
-            if match.group(0) in ",;:":
-                if len(self.buffer) <= self.config.first_chunk_max_chars + grace_chars:
-                    logger.info(
-                        "RESPONSE_CHUNK_BOUNDARY: reason=held_for_better_boundary"
-                    )
-                    continue
-                if (
-                    match.group(0) == ","
-                    and len(candidate) < self.config.first_chunk_target_chars
-                ):
-                    logger.info(
-                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
-                    )
-                    continue
-                if self._ends_with_weak_word(candidate):
-                    logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=weak_tail")
-                    continue
-                if match.group(0) == "," and self._next_starts_conjunction(split_at):
-                    logger.info(
-                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction"
-                    )
-                    continue
-                if match.group(0) == "," and not self._phrase_before_soft_punctuation_is_complete(candidate):
-                    logger.info(
-                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
-                    )
-                    continue
-                if self._next_starts_dependent(split_at):
-                    logger.info(
-                        "RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction"
-                    )
-                    continue
-            if self._is_tiny_chunk(candidate) and not self._is_complete_short_reply(candidate):
-                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=tiny_chunk")
-                continue
-            self._last_split_reason = "soft_punctuation" if match.group(0) in ",;:" else "sentence"
-            return split_at
-
-        return None
-
-    def _sentence_split(self) -> Optional[int]:
-        if not self.config.prefer_sentence_boundary:
-            return None
-        matches = list(re.finditer(r"[.!?](?=\s|$)", self.buffer))
-        if not matches:
-            return None
-        chosen: Optional[int] = None
-        for match in matches:
-            split_at = match.end()
-            candidate = self._clean(self.buffer[:split_at])
-            if self.config.merge_tiny_chunks and len(candidate) <= self.config.tiny_chunk_max_chars:
-                logger.info("RESPONSE_CHUNK_MERGED: reason=tiny_chunk")
-                chosen = split_at
-                continue
-            if len(candidate) < self.config.min_chars and self.emitted_count > 0:
-                chosen = split_at
-                continue
-            if (
-                self.config.merge_tiny_chunks
-                and len(candidate) < self.config.single_chunk_under_chars
-                and self._remaining_can_complete_short_response(split_at)
-            ):
-                chosen = split_at
-                continue
-            if chosen is not None and len(candidate) <= self.config.absolute_max_chars:
-                return split_at
-            return split_at
-        if chosen is not None and len(self.buffer) > self.config.absolute_max_chars:
-            return chosen
-        return chosen if self.exhausted else None
-
-    def _soft_punctuation_split(self) -> Optional[int]:
-        threshold = (
-            self.config.first_chunk_target_chars
-            if self.emitted_count == 0
-            else self.config.normal_chunk_target_chars
-        )
-        if len(self.buffer) < threshold:
-            return None
-        if self._buffer_is_complete_short_response():
-            return None
-        for match in re.finditer(r"[,;:](?=\s|$)", self.buffer):
-            split_at = match.end()
-            candidate = self._clean(self.buffer[:split_at])
-            if len(candidate) < self.config.min_chars:
-                continue
-            if len(candidate) > self.config.absolute_max_chars:
-                continue
-            if self._ends_with_weak_word(candidate):
-                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=weak_tail")
-                continue
-            if match.group(0) == "," and self._next_starts_conjunction(split_at):
-                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction")
-                continue
-            if match.group(0) == "," and not self._phrase_before_soft_punctuation_is_complete(candidate):
-                logger.info(
-                    "RESPONSE_CHUNK_AVOID_SPLIT: reason=held_for_better_boundary"
-                )
-                continue
-            if self._is_tiny_chunk(candidate):
-                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=tiny_chunk")
-                continue
-            if self._next_starts_dependent(split_at):
-                logger.info("RESPONSE_CHUNK_AVOID_SPLIT: reason=comma_conjunction")
-                continue
-            return split_at
-        return None
-
-    def _length_split(self) -> Optional[int]:
-        active_max = (
-            self.config.absolute_max_chars
-            if self.emitted_count == 0
-            else self.config.normal_chunk_max_chars
-        )
-        if len(self.buffer) < active_max:
-            return None
-        if self._buffer_is_complete_short_response():
-            return None
-
-        limit = min(active_max, self.config.absolute_max_chars)
-        split_at = self._word_split_before(limit)
-        if split_at is not None:
-            return split_at
-
-        if len(self.buffer) >= self.config.absolute_max_chars:
-            return self.config.absolute_max_chars
-        return None
-
-    def _word_split_before(self, limit: int) -> Optional[int]:
-        for match in reversed(list(re.finditer(r"\s+", self.buffer[: limit + 1]))):
-            split_at = match.start()
-            if split_at < self.config.min_chars:
-                break
-            candidate = self._clean(self.buffer[:split_at])
-            remainder = self._clean(self.buffer[split_at:])
-            if remainder and self._is_tiny_chunk(remainder):
-                logger.info("RESPONSE_CHUNK_MERGED: reason=tiny_chunk")
-                continue
-            if (
-                candidate
-                and not self._ends_with_weak_word(candidate)
-                and not self._next_starts_dependent(split_at)
-            ):
-                return split_at
-        return None
-
-    def _fit_total_budget(self, text: str) -> str:
-        remaining = self.config.max_total_chars - self.emitted_chars
-        if remaining <= 0:
-            return ""
-        if len(text) <= remaining:
-            return text
-
-        clipped = text[:remaining].rstrip()
-        split_at = max(
-            clipped.rfind("."),
-            clipped.rfind("?"),
-            clipped.rfind("!"),
-            clipped.rfind(","),
-            clipped.rfind(";"),
-            clipped.rfind(" "),
-        )
-        if split_at >= self.config.min_chars:
-            clipped = clipped[: split_at + 1].rstrip()
-        return clipped
-
-    @staticmethod
-    def _ends_with_weak_word(text: str) -> bool:
-        words = re.findall(r"[a-zA-Z']+", text.lower())
-        if not words:
-            return False
-        return words[-1].strip("'") in WEAK_TRAILING_WORDS
-
-    def _next_starts_dependent(self, split_at: int) -> bool:
-        remainder = self.buffer[split_at:].lstrip()
-        match = re.match(r"([a-zA-Z']+)", remainder)
+    def _sentence_split(self) -> int | None:
+        match = re.search(r"[.!?](?=\s|$)", self.buffer)
         if not match:
-            return False
-        return match.group(1).strip("'").lower() in DEPENDENT_START_WORDS
+            return None
+        return match.end()
 
-    def _next_starts_conjunction(self, split_at: int) -> bool:
-        remainder = self.buffer[split_at:].lstrip()
-        match = re.match(r"([a-zA-Z']+)", remainder)
-        if not match:
-            return False
-        return match.group(1).strip("'").lower() in CONJUNCTION_START_WORDS
-
-    @staticmethod
-    def _word_count(text: str) -> int:
-        return len(re.findall(r"[a-zA-Z0-9']+", text))
-
-    def _is_tiny_chunk(self, text: str) -> bool:
-        cleaned = self._clean(text)
-        return bool(cleaned) and self._word_count(cleaned) < 6
-
-    @staticmethod
-    def _phrase_before_soft_punctuation_is_complete(text: str) -> bool:
-        words = re.findall(r"[a-zA-Z']+", text.lower())
-        if len(words) < 6:
-            return False
-        return words[-1].strip("'") in SOFT_COMPLETE_TRAILING_WORDS
-
-    def _remaining_can_complete_short_response(self, split_at: int) -> bool:
-        remainder = self.buffer[split_at:].lstrip()
-        if not remainder:
-            return True
-        combined = self._clean(self.buffer)
-        if len(combined) > self.config.single_chunk_under_chars:
-            return False
-        return bool(re.search(r"[.!?](?=\s|$)", remainder))
-
-    def _should_hold_short_response(self, candidate: str) -> bool:
-        if not self.config.merge_tiny_chunks:
-            return False
-        full = self._clean(self.buffer)
-        return (
-            candidate != full
-            and len(full) <= self.config.single_chunk_under_chars
-            and bool(re.search(r"[.!?](?=\s|$)", full))
-        )
-
-    def _buffer_is_complete_short_response(self) -> bool:
-        return (
-            self.config.merge_tiny_chunks
-            and len(self._clean(self.buffer)) <= self.config.single_chunk_under_chars
-            and bool(re.search(r"[.!?](?=\s|$)", self.buffer))
-        )
-
-    @staticmethod
-    def _is_complete_short_reply(text: str) -> bool:
-        return text.strip().lower() in COMPLETE_SHORT_REPLIES
+    def _record_emit(self, text: str) -> None:
+        self.emitted_count += 1
+        self.emitted_chars += len(text)
 
     @staticmethod
     def _clean(text: str) -> str:

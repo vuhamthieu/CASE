@@ -136,6 +136,12 @@ def check(profile: str, final_backend: str) -> tuple[int, dict[str, object], lis
 
 def print_text(payload: dict[str, object], lines: list[CheckLine]) -> None:
     for entry in lines:
+        if entry.classification == "OPTIONAL_smart_turn":
+            print(
+                "OPTIONAL_smart_turn missing; CASE will use VAD/timing "
+                "turn-ending fallback."
+            )
+            continue
         print(f"{entry.status:<7} {entry.classification} {entry.path}")
 
     result = str(payload["result"])

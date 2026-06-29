@@ -27,8 +27,8 @@ from src.realtime.realtime_config import (
     CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC,
     CASE_TTS_ALLOW_MULTI_CHUNK,
     CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
+    CASE_TTS_CHUNK_MODE,
     CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-    CASE_TTS_FIRST_CHUNK_GRACE_MS,
     CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
     CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
     CASE_TTS_CHUNK_MAX_CHARS,
@@ -475,13 +475,7 @@ class CASEPersonality:
         stream_started = False
 
         metrics["llm_stream_start_at"] = time.monotonic()
-        logger.info(
-            "RESPONSE_CHUNK_POLICY: first_target=%s first_max=%s normal_target=%s normal_max=%s",
-            CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
-            CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-            CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
-            CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
-        )
+        logger.info("RESPONSE_CHUNK_MODE: %s", CASE_TTS_CHUNK_MODE)
         logger.info("LLM_MODE: plain_text_stream tools_enabled=False")
         if self.realtime_hybrid:
             logger.info("LLM_REQUEST_TOOLS: count=0 tools_enabled=False")
@@ -582,6 +576,13 @@ class CASEPersonality:
                 raw_response += fragment
                 dialogue_fragment = fragment if self.realtime_hybrid else extractor.feed(fragment)
                 for speech_chunk in chunker.feed(dialogue_fragment):
+                    logger.info(
+                        "RESPONSE_SENTENCE_READY: turn=%s seq=%s chars=%s text=%r",
+                        turn_id,
+                        emitted_chunks,
+                        len(speech_chunk),
+                        speech_chunk,
+                    )
                     emitted_chunks += await self._queue_stream_chunk(
                         turn_id,
                         emitted_chunks,
@@ -596,6 +597,13 @@ class CASEPersonality:
 
             if emitted_chunks == 0 and not chunker.buffer.strip() and parsed_dialogue:
                 for speech_chunk in chunker.feed(parsed_dialogue):
+                    logger.info(
+                        "RESPONSE_SENTENCE_READY: turn=%s seq=%s chars=%s text=%r",
+                        turn_id,
+                        emitted_chunks,
+                        len(speech_chunk),
+                        speech_chunk,
+                    )
                     emitted_chunks += await self._queue_stream_chunk(
                         turn_id,
                         emitted_chunks,
@@ -605,7 +613,9 @@ class CASEPersonality:
 
             for speech_chunk in chunker.flush():
                 logger.info(
-                    "RESPONSE_FINAL_FLUSH: chars=%s text=%r",
+                    "RESPONSE_FINAL_REMAINDER_FLUSH: turn=%s seq=%s chars=%s text=%r",
+                    turn_id,
+                    emitted_chunks,
                     len(speech_chunk),
                     speech_chunk,
                 )
@@ -768,7 +778,11 @@ class CASEPersonality:
                 return 0
 
         chunks = [text]
-        if int(metrics.get("tts_chunks_accepted", 0)) == 0 and len(text) > CASE_TTS_FIRST_CHUNK_MAX_CHARS:
+        if (
+            CASE_TTS_CHUNK_MODE != "sentence"
+            and int(metrics.get("tts_chunks_accepted", 0)) == 0
+            and len(text) > CASE_TTS_FIRST_CHUNK_MAX_CHARS
+        ):
             candidate_chunks = self._split_first_chunk_after_safe_text(text)
             if metrics.get("realtime_hybrid") and CASE_TTS_DROP_OVERFLOW_IN_REALTIME:
                 accepted = int(metrics.get("tts_chunks_accepted", 0))
@@ -1019,7 +1033,6 @@ class CASEPersonality:
             absolute_max_chars=CASE_TTS_CHUNK_ABSOLUTE_MAX_CHARS,
             first_chunk_target_chars=CASE_TTS_FIRST_CHUNK_TARGET_CHARS,
             first_chunk_max_chars=CASE_TTS_FIRST_CHUNK_MAX_CHARS,
-            first_chunk_grace_ms=CASE_TTS_FIRST_CHUNK_GRACE_MS,
             normal_chunk_target_chars=CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
             normal_chunk_max_chars=CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
             flush_first_on_soft_punctuation=CASE_TTS_FLUSH_FIRST_ON_SOFT_PUNCTUATION,
@@ -1029,6 +1042,7 @@ class CASEPersonality:
             merge_tiny_chunks=CASE_TTS_MERGE_TINY_CHUNKS,
             tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
             single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+            chunk_mode=CASE_TTS_CHUNK_MODE,
         )
 
     async def _fallback_full_response_stream(
