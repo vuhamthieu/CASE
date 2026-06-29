@@ -423,6 +423,14 @@ class STTEngine:
         self.final_mode = "vosk_small"
         self.final_fallback_mode = ""
         self.lgraph_final_timeout_sec = max(0.0, CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC)
+        self.lgraph_final_timeout_source = (
+            "env"
+            if (
+                os.getenv("CASE_STT_FINAL_TIMEBOX_SEC") is not None
+                or os.getenv("CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC") is not None
+            )
+            else "default"
+        )
         self.accept_fast_candidate_on_timeout = (
             CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT
         )
@@ -504,6 +512,11 @@ class STTEngine:
             self.reopen_after_final_sec,
             self.max_command_listen_sec,
             self.followup_timeout_sec,
+        )
+        logging.info(
+            "STT_FINAL_TIMEBOX_CONFIG: backend=vosk_lgraph timeout=%.2fs source=%s",
+            self.lgraph_final_timeout_sec,
+            self.lgraph_final_timeout_source,
         )
         self._load_vosk_model()
         self._load_optional_stt_components()

@@ -1,10 +1,13 @@
 import concurrent.futures
+import importlib
+import os
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -77,6 +80,40 @@ class SttFinalTimeboxTests(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertEqual(error, "lgraph_timeout")
         self.assertLess(time.monotonic() - started, 0.15)
+
+    def test_default_lgraph_final_timebox_is_two_point_five_seconds(self):
+        import src.realtime.realtime_config as realtime_config
+
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CASE_STT_FINAL_TIMEBOX_SEC", None)
+            os.environ.pop("CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC", None)
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_FINAL_TIMEBOX_SEC, 2.5)
+                self.assertEqual(
+                    realtime_config.CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC,
+                    2.5,
+                )
+            finally:
+                importlib.reload(realtime_config)
+
+    def test_lgraph_final_timebox_env_override(self):
+        import src.realtime.realtime_config as realtime_config
+
+        with patch.dict(
+            "os.environ",
+            {"CASE_STT_FINAL_TIMEBOX_SEC": "3.75"},
+            clear=False,
+        ):
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_FINAL_TIMEBOX_SEC, 3.75)
+                self.assertEqual(
+                    realtime_config.CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC,
+                    3.75,
+                )
+            finally:
+                importlib.reload(realtime_config)
 
     def test_clear_fast_intent_bypasses_slow_lgraph(self):
         engine = self.make_engine()
