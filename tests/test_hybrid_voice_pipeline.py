@@ -471,6 +471,69 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0][1]["turn_id"], 12)
         self.assertEqual(metrics["thinking_filler_played"], 1)
 
+    async def test_thinking_filler_skips_followup_feedback_reason(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {"transcript_accept_reason": "followup_feedback"}
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+            0.01,
+        ), self.assertLogs("cognition.personality", level="INFO") as logs:
+            personality._schedule_thinking_filler(18, "very funny", metrics)
+            await asyncio.sleep(0.02)
+
+        self.assertTrue(
+            any("THINKING_FILLER_SKIP: reason=feedback_turn" in line for line in logs.output)
+        )
+        self.assertNotIn(
+            "THINKING_FILLER_PLAY",
+            [topic for topic, _payload in bus.events],
+        )
+
+    async def test_thinking_filler_skips_short_feedback_text(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {}
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+            0.01,
+        ):
+            personality._schedule_thinking_filler(19, "very funny", metrics)
+            await asyncio.sleep(0.02)
+
+        self.assertNotIn(
+            "THINKING_FILLER_PLAY",
+            [topic for topic, _payload in bus.events],
+        )
+
+    async def test_thinking_filler_still_schedules_complex_question(self):
+        bus = FakeBus()
+        personality = CASEPersonality.__new__(CASEPersonality)
+        personality.message_bus = bus
+        personality._thinking_filler_tasks = {}
+        metrics = {}
+
+        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+            0.01,
+        ):
+            personality._schedule_thinking_filler(
+                20,
+                "explain how your voice pipeline works",
+                metrics,
+            )
+            await asyncio.sleep(0.03)
+
+        events = [event for event in bus.events if event[0] == "THINKING_FILLER_PLAY"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1]["turn_id"], 20)
+
     async def test_simple_prompt_uses_longer_thinking_filler_delay(self):
         bus = FakeBus()
         personality = CASEPersonality.__new__(CASEPersonality)

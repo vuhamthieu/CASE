@@ -126,6 +126,18 @@ SIMPLE_THINKING_FILLER_PROMPTS = {
     "continue",
     "tell me a joke",
 }
+THINKING_FILLER_FEEDBACK_PHRASES = {
+    "very funny",
+    "funny",
+    "nice",
+    "good",
+    "okay",
+    "ok",
+    "haha",
+    "lol",
+    "yeah",
+    "right",
+}
 
 FIRST_TTS_CHUNK_MAX_CHARS = 55
 FIRST_TTS_CHUNK_MAX_WORDS = 8
@@ -914,6 +926,9 @@ class CASEPersonality:
             return
         if int(CASE_THINKING_FILLER_MAX_PER_TURN) <= 0:
             return
+        if self._is_feedback_thinking_filler_turn(user_text, metrics):
+            logger.info("THINKING_FILLER_SKIP: reason=feedback_turn")
+            return
 
         simple_prompt = self._is_simple_thinking_filler_prompt(user_text)
         delay = (
@@ -984,9 +999,27 @@ class CASEPersonality:
 
     @staticmethod
     def _is_simple_thinking_filler_prompt(text: str) -> bool:
+        return CASEPersonality._normalize_short_turn_text(text) in SIMPLE_THINKING_FILLER_PROMPTS
+
+    @staticmethod
+    def _is_feedback_thinking_filler_turn(text: str, metrics: dict) -> bool:
+        reason = str(
+            metrics.get("transcript_accept_reason")
+            or metrics.get("accept_reason")
+            or metrics.get("followup_reason")
+            or ""
+        ).strip().lower()
+        if reason == "followup_feedback":
+            return True
+        return (
+            CASEPersonality._normalize_short_turn_text(text)
+            in THINKING_FILLER_FEEDBACK_PHRASES
+        )
+
+    @staticmethod
+    def _normalize_short_turn_text(text: str) -> str:
         normalized = re.sub(r"[^a-z0-9'\s]+", " ", str(text).lower())
-        normalized = " ".join(normalized.split())
-        return normalized in SIMPLE_THINKING_FILLER_PROMPTS
+        return " ".join(normalized.split())
 
     @staticmethod
     def _split_first_chunk_after_safe_text(text: str) -> list[str]:
