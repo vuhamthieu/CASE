@@ -58,6 +58,21 @@
         "rasp berry pi"
       ],
       "negative_context": []
+    },
+    {
+      "canonical": "you, CASE",
+      "patterns": [
+        "uk case"
+      ],
+      "negative_context": [
+        "united kingdom",
+        "uk legal case",
+        "uk court case",
+        "legal case",
+        "court case",
+        "lawsuit",
+        "law case"
+      ]
     }
   ]
 }

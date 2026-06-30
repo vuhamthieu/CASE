@@ -56,6 +56,11 @@ class GeminiCloudSttProvider:
         self.model = model
         self.prompt = prompt or (
             "Transcribe this short user command audio exactly. "
+            "The robot's name is CASE. The speaker may say CASE as a name. "
+            "When the phrase refers to the robot, prefer 'you, CASE' or 'CASE' "
+            "over 'UK case'. "
+            "Common project terms include CASE, GTA 6, Grand Theft Auto 6, "
+            "ESP32, Raspberry Pi, PCA9685, Piper, Vosk, and Gemini. "
             "Return only the spoken words as plain text. "
             "Do not explain, summarize, translate, or add punctuation unless obvious."
         )

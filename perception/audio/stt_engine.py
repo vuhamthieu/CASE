@@ -766,8 +766,15 @@ class STTEngine:
         logging.info("STT_PROFILE: %s", self.stt_plan.profile)
         logging.info("VAD_MODE: %s", "silero" if self.vad_gate is not None else "rms_fallback")
         logging.info("STT_ENDPOINT_MODE: vosk_small")
-        logging.info("STT_FINAL_MODE: %s", self.final_mode)
-        if self.final_fallback_mode:
+        if getattr(self, "cloud_stt_final_mode", CASE_STT_FINAL_MODE) == "cloud":
+            logging.info("STT_FINAL_MODE: cloud")
+            logging.info("STT_FINAL_FALLBACK: %s", self.cloud_stt_fallback)
+        else:
+            logging.info("STT_FINAL_MODE: %s", self.final_mode)
+        if (
+            self.final_fallback_mode
+            and getattr(self, "cloud_stt_final_mode", CASE_STT_FINAL_MODE) != "cloud"
+        ):
             logging.info("STT_FINAL_FALLBACK: %s", self.final_fallback_mode)
 
     def _validate_wake_settings(self) -> None:

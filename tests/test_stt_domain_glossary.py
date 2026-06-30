@@ -36,6 +36,20 @@ class SttDomainGlossaryTests(unittest.TestCase):
                 self.assertEqual(repaired, transcript)
                 self.assertIsNone(match)
 
+    def test_uk_case_robot_context_repairs_to_case_name(self):
+        for transcript in ("UK case", "thank you UK case", "are you listening UK case"):
+            with self.subTest(transcript=transcript):
+                repaired, match = self.glossary.repair(transcript)
+                self.assertIn("you, CASE", repaired)
+                self.assertIsNotNone(match)
+
+    def test_uk_legal_or_court_case_is_unchanged(self):
+        for transcript in ("UK legal case", "UK court case", "tell me about the UK court case"):
+            with self.subTest(transcript=transcript):
+                repaired, match = self.glossary.repair(transcript)
+                self.assertEqual(repaired, transcript)
+                self.assertIsNone(match)
+
 
 if __name__ == "__main__":
     unittest.main()

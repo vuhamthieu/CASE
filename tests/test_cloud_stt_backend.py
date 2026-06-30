@@ -34,7 +34,7 @@ if "scipy.signal" not in sys.modules:
 
 from perception.audio.stt_engine import STTEngine
 from src.config import defaults
-from src.stt_backends.cloud_stt import CloudSttResult
+from src.stt_backends.cloud_stt import CloudSttResult, GeminiCloudSttProvider
 from src.stt_backends.domain_glossary import DomainGlossary
 
 for module_name in STUBBED_MODULES:
@@ -71,7 +71,10 @@ class CloudSttBackendTests(unittest.TestCase):
         engine.cloud_stt_save_debug_audio = False
         engine.cloud_stt_debug_dir = Path("output/stt_debug")
         engine._cloud_stt_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        engine.stt_plan = SimpleNamespace(final_chain=("vosk_lgraph", "vosk_small"))
+        engine.stt_plan = SimpleNamespace(
+            profile="balanced",
+            final_chain=("vosk_lgraph", "vosk_small"),
+        )
         engine.final_mode = "vosk_lgraph"
         engine.vosk_lgraph_model_path = Path("/path/that/does/not/exist")
         engine._last_transcript_source = ""
@@ -150,6 +153,27 @@ class CloudSttBackendTests(unittest.TestCase):
         self.assertEqual(defaults.VOICE_OUTPUT_BACKEND, "piper_onnx")
         self.assertEqual(defaults.PIPER_MODEL_PATH, "models/voices/CASE.onnx")
         self.assertFalse(defaults.GEMINI_LIVE_NATIVE_AUDIO_ENABLED)
+
+    def test_cloud_final_mode_logs_cloud_as_active_mode(self):
+        self.engine = self.make_engine(FakeCloudSttProvider("hello"))
+        self.engine.vad_gate = None
+        self.engine.final_fallback_mode = "vosk_small"
+
+        with self.assertLogs(level="INFO") as logs:
+            self.engine._log_stt_profile_runtime()
+
+        output = "\n".join(logs.output)
+        self.assertIn("STT_FINAL_MODE: cloud", output)
+        self.assertIn("STT_FINAL_FALLBACK: vosk_small", output)
+        self.assertNotIn("STT_FINAL_MODE: vosk_lgraph", output)
+
+    def test_gemini_cloud_stt_prompt_includes_case_name_context(self):
+        provider = GeminiCloudSttProvider(api_key="test-key", model="test-model")
+
+        self.assertIn("robot's name is CASE", provider.prompt)
+        self.assertIn("UK case", provider.prompt)
+        self.assertIn("GTA 6", provider.prompt)
+        self.assertIn("PCA9685", provider.prompt)
 
 
 if __name__ == "__main__":
