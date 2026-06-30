@@ -31,10 +31,18 @@ from src.config.env import get_bool, get_str
 from src.realtime.realtime_config import (
     CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT,
     CASE_STT_FINAL_BACKEND,
+    CASE_STT_FINAL_MODE,
     CASE_STT_GLOSSARY_PATH,
     CASE_STT_GLOSSARY_REPAIR,
     CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC,
     CASE_STT_PROFILE,
+    CASE_CLOUD_STT_DEBUG_DIR,
+    CASE_CLOUD_STT_FALLBACK,
+    CASE_CLOUD_STT_MODEL,
+    CASE_CLOUD_STT_PROVIDER,
+    CASE_CLOUD_STT_SAVE_DEBUG_AUDIO,
+    CASE_CLOUD_STT_TIMEOUT_SEC,
+    GEMINI_API_KEY,
     GTCRN_MODEL_PATH,
     HYBRID_HOLD_WEAK_ENDING_SEC,
     HYBRID_REJECT_TOO_SHORT,
@@ -58,6 +66,11 @@ from src.realtime.realtime_config import (
     TRANSCRIPT_INPUT_BACKEND,
     VOSK_LGRAPH_MODEL_PATH,
     VOSK_SMALL_MODEL_PATH,
+)
+from src.stt_backends.cloud_stt import (
+    CloudSttProvider,
+    build_cloud_stt_provider,
+    waveform_to_wav_bytes,
 )
 from src.stt_backends.domain_glossary import DomainGlossary, load_domain_glossary
 from src.stt_backends.sherpa_sensevoice_backend import SherpaSenseVoiceBackend
@@ -435,6 +448,13 @@ class STTEngine:
         self.final_vosk_model_path: Optional[Path] = None
         self.final_mode = "vosk_small"
         self.final_fallback_mode = ""
+        self.cloud_stt_final_mode = CASE_STT_FINAL_MODE
+        self.cloud_stt_provider_name = CASE_CLOUD_STT_PROVIDER
+        self.cloud_stt_timeout_sec = max(0.0, CASE_CLOUD_STT_TIMEOUT_SEC)
+        self.cloud_stt_fallback = CASE_CLOUD_STT_FALLBACK
+        self.cloud_stt_save_debug_audio = CASE_CLOUD_STT_SAVE_DEBUG_AUDIO
+        self.cloud_stt_debug_dir = self._resolve_path(CASE_CLOUD_STT_DEBUG_DIR)
+        self.cloud_stt_provider: CloudSttProvider | None = None
         self.lgraph_final_timeout_sec = max(0.0, CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC)
         self.lgraph_final_timeout_source = (
             "env"
@@ -497,6 +517,7 @@ class STTEngine:
         self._tts_idle_event = threading.Event()
         self._tts_idle_event.set()
         self._last_published_transcript = ""
+        self._last_transcript_source = ""
         self._session_turn_metrics: dict[str, float] = {}
         self._last_transcript_metrics: dict[str, float] = {}
         self.vad_gate: Optional[SileroVadGate] = None
@@ -507,6 +528,10 @@ class STTEngine:
         self._final_stt_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="case-stt-final",
+        )
+        self._cloud_stt_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="case-cloud-stt",
         )
 
         self.audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=512)
@@ -538,6 +563,14 @@ class STTEngine:
             self.lgraph_final_timeout_sec,
             self.lgraph_final_timeout_source,
         )
+        logging.info(
+            "CLOUD_STT_CONFIG: provider=%s timeout=%.2fs fallback=%s mode=%s",
+            self.cloud_stt_provider_name,
+            self.cloud_stt_timeout_sec,
+            self.cloud_stt_fallback,
+            self.cloud_stt_final_mode,
+        )
+        self._load_cloud_stt_provider()
         self._load_vosk_model()
         self._load_optional_stt_components()
         self._load_wakeword_model()
@@ -568,6 +601,23 @@ class STTEngine:
             )
             lgraph = legacy_lgraph.resolve()
         return lgraph
+
+    def _load_cloud_stt_provider(self) -> None:
+        if self.cloud_stt_final_mode != "cloud":
+            return
+        try:
+            self.cloud_stt_provider = build_cloud_stt_provider(
+                self.cloud_stt_provider_name,
+                api_key=GEMINI_API_KEY,
+                model=CASE_CLOUD_STT_MODEL,
+            )
+        except Exception as exc:
+            self.cloud_stt_provider = None
+            logging.warning(
+                "CLOUD_STT_FALLBACK: reason=provider_unavailable error=%s fallback=%s",
+                exc,
+                self.cloud_stt_fallback,
+            )
 
     def _load_optional_stt_components(self) -> None:
         if "sensevoice" in self.stt_plan.final_chain:
@@ -1220,10 +1270,13 @@ class STTEngine:
                 repaired_text = repaired
                 repair_reason = reason
 
-        logging.info(
-            "TRANSCRIPT_FINAL_TEXT: text=%r source=repaired_text",
-            repaired_text,
+        selected_source = getattr(self, "_last_transcript_source", "")
+        final_source = (
+            "cloud_stt/repaired_text"
+            if selected_source == "cloud_stt"
+            else "repaired_text"
         )
+        logging.info("TRANSCRIPT_FINAL_TEXT: text=%r source=%s", repaired_text, final_source)
         return ProcessedTranscript(
             raw_text=raw_text,
             repaired_text=repaired_text,
@@ -1546,6 +1599,88 @@ class STTEngine:
         recognizer.AcceptWaveform(np.asarray(waveform, dtype="<i2").tobytes())
         return self._parse_vosk_text(recognizer, final=True)
 
+    def _save_cloud_stt_debug_audio(self, waveform: np.ndarray) -> None:
+        if not self.cloud_stt_save_debug_audio or waveform.size == 0:
+            return
+        try:
+            self.cloud_stt_debug_dir.mkdir(parents=True, exist_ok=True)
+            turn_id = int(self._session_turn_metrics.get("turn_id", time.time()))
+            path = self.cloud_stt_debug_dir / f"turn_{turn_id}.wav"
+            path.write_bytes(waveform_to_wav_bytes(waveform, self.samplerate))
+            logging.info("CLOUD_STT_DEBUG_AUDIO: saved path=%s", path)
+        except Exception as exc:
+            logging.warning("CLOUD_STT_DEBUG_AUDIO: failed error=%s", exc)
+
+    def _transcribe_cloud_timeboxed(
+        self,
+        waveform: np.ndarray,
+    ) -> tuple[str, str | None]:
+        provider = getattr(self, "cloud_stt_provider", None)
+        provider_name = getattr(self, "cloud_stt_provider_name", CASE_CLOUD_STT_PROVIDER)
+        timeout = max(0.0, float(getattr(self, "cloud_stt_timeout_sec", CASE_CLOUD_STT_TIMEOUT_SEC)))
+        if provider is None:
+            logging.info(
+                "CLOUD_STT_FALLBACK: reason=provider_unavailable fallback=%s",
+                getattr(self, "cloud_stt_fallback", CASE_CLOUD_STT_FALLBACK),
+            )
+            return "", "provider_unavailable"
+        if waveform.size == 0:
+            logging.info(
+                "CLOUD_STT_FALLBACK: reason=empty_audio fallback=%s",
+                getattr(self, "cloud_stt_fallback", CASE_CLOUD_STT_FALLBACK),
+            )
+            return "", "empty_audio"
+
+        audio_duration = len(waveform) / float(self.samplerate)
+        logging.info(
+            "CLOUD_STT_REQUEST_START: provider=%s audio_duration=%.3f",
+            provider_name,
+            audio_duration,
+        )
+        self._save_cloud_stt_debug_audio(waveform)
+        started = time.monotonic()
+        executor = getattr(self, "_cloud_stt_executor", None)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="case-cloud-stt",
+            )
+            self._cloud_stt_executor = executor
+        future = executor.submit(provider.transcribe, waveform, self.samplerate)
+        try:
+            result = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            logging.warning(
+                "CLOUD_STT_TIMEOUT: provider=%s timeout=%.2fs",
+                provider_name,
+                timeout,
+            )
+            return "", "timeout"
+        except Exception as exc:
+            logging.warning(
+                "CLOUD_STT_FALLBACK: reason=error error=%s fallback=%s",
+                exc,
+                getattr(self, "cloud_stt_fallback", CASE_CLOUD_STT_FALLBACK),
+            )
+            return "", "error"
+
+        text = str(getattr(result, "text", "") or "").strip()
+        latency = float(getattr(result, "latency_sec", time.monotonic() - started))
+        logging.info(
+            "CLOUD_STT_RESULT: provider=%s text=%r latency=%.3f",
+            provider_name,
+            text,
+            latency,
+        )
+        if is_usable_transcript(text):
+            return text, None
+        logging.info(
+            "CLOUD_STT_FALLBACK: reason=empty_result fallback=%s",
+            getattr(self, "cloud_stt_fallback", CASE_CLOUD_STT_FALLBACK),
+        )
+        return text, "empty_result"
+
     def _is_clear_fast_intent(self, text: str) -> bool:
         cleaned = self._normalize_transcript(text)
         if not cleaned:
@@ -1595,10 +1730,32 @@ class STTEngine:
         waveform: np.ndarray,
         backend_status: dict,
     ) -> tuple[str, str]:
+        if (
+            getattr(self, "cloud_stt_final_mode", CASE_STT_FINAL_MODE) == "cloud"
+            and waveform.size
+        ):
+            cloud_text, cloud_error = self._transcribe_cloud_timeboxed(waveform)
+            if cloud_error is None and is_usable_transcript(cloud_text):
+                backend_status["selected_source"] = "cloud_stt"
+                self._last_transcript_source = "cloud_stt"
+                return dedupe_repeated_transcript(cloud_text), "cloud_stt"
+            backend_status["cloud_stt_error"] = cloud_error or "empty_result"
+            fallback = getattr(self, "cloud_stt_fallback", CASE_CLOUD_STT_FALLBACK)
+            logging.info(
+                "CLOUD_STT_FALLBACK: reason=%s fallback=%s",
+                backend_status["cloud_stt_error"],
+                fallback,
+            )
+            if fallback == "vosk_small":
+                backend_status["selected_source"] = "vosk_small"
+                self._last_transcript_source = "vosk_small"
+                return dedupe_repeated_transcript(vosk_candidate), "cloud_fallback"
+
         if is_usable_transcript(vosk_candidate) and self._is_clear_fast_intent(
             vosk_candidate
         ):
             backend_status["selected_source"] = "vosk_small"
+            self._last_transcript_source = "vosk_small"
             return dedupe_repeated_transcript(vosk_candidate), "clear_fast_intent"
 
         lgraph_text = ""
@@ -1634,6 +1791,7 @@ class STTEngine:
         )
         if reason == "profile_chain" and backend_status.get("selected_source") == "vosk_small":
             reason = "fallback"
+        self._last_transcript_source = backend_status.get("selected_source", "")
         return selected, reason
 
     @staticmethod
@@ -1772,6 +1930,7 @@ class STTEngine:
             append_transcript_part(selected)
             selected_raw = {
                 "sensevoice": sense_text,
+                "cloud_stt": selected,
                 "vosk_lgraph": selected,
                 "vosk_small": vosk_candidate,
                 "vosk_fallback": vosk_candidate,
@@ -2421,6 +2580,7 @@ class STTEngine:
                     pass
 
             self._final_stt_executor.shutdown(wait=False, cancel_futures=True)
+            self._cloud_stt_executor.shutdown(wait=False, cancel_futures=True)
 
             logging.info("STT shutdown complete.")
             console.system("STT stopped")
