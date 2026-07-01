@@ -35,6 +35,13 @@ from src.realtime.realtime_config import (
     CASE_TTS_TRIM_KEEP_MS,
     CASE_TTS_TRIM_SILENCE,
     CASE_TTS_TRIM_THRESHOLD_DB,
+    CASE_TTS_EMOTION_ENABLED,
+    CASE_TTS_DEFAULT_EMOTION,
+    CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+    CASE_TTS_EMOTION_MAX_GAIN_DB,
+    CASE_TTS_EMOTION_USE_GAIN,
+    CASE_TTS_EMOTION_USE_LENGTH_SCALE,
+    CASE_TTS_EMOTION_ENABLE_PITCH_SHIFT,
     CASE_THINKING_FILLER_DIR,
     CASE_THINKING_FILLER_KEYS,
     CASE_THINKING_FILLER_PREFERRED_KEYS,
@@ -49,6 +56,7 @@ from src.voice_pipeline.thinking_filler import (
     ThinkingFillerSelector,
     play_thinking_filler_wav,
 )
+from src.persona.emotion import EmotionState, blend_tts_emotion_profile, parse_leading_emotion_tag
 
 
 if TYPE_CHECKING:
@@ -124,6 +132,27 @@ def trim_tts_silence_pcm(
         "lead_ms": start * 1000.0 / sample_rate,
         "tail_ms": (samples.size - end) * 1000.0 / sample_rate,
         "kept_ms": (end - start) * 1000.0 / sample_rate,
+    }
+
+
+def apply_gain_limited_pcm(raw_audio: bytes, gain_db: float) -> tuple[bytes, dict[str, float]]:
+    samples = np.frombuffer(raw_audio, dtype="<i2").astype(np.float32)
+    if samples.size == 0 or abs(float(gain_db)) < 0.01:
+        return raw_audio, {"limited": 0.0, "peak_before": 0.0, "peak_after": 0.0}
+    peak_before = float(np.max(np.abs(samples)))
+    multiplier = 10.0 ** (float(gain_db) / 20.0)
+    boosted = samples * multiplier
+    boosted_peak = float(np.max(np.abs(boosted))) if boosted.size else 0.0
+    limited = 0.0
+    if boosted_peak > 32767.0:
+        boosted *= 32767.0 / boosted_peak
+        limited = 1.0
+    output = np.clip(np.rint(boosted), -32768, 32767).astype("<i2")
+    peak_after = float(np.max(np.abs(output.astype(np.float32)))) if output.size else 0.0
+    return output.tobytes(), {
+        "limited": limited,
+        "peak_before": peak_before,
+        "peak_after": peak_after,
     }
 
 
@@ -236,16 +265,26 @@ class CASEVoice:
         if not isinstance(text, str) or not text.strip():
             return
 
+        tag_state, clean_text = parse_leading_emotion_tag(text)
+        text = clean_text
         logger.info("CASE_TTS: speaking text=%r", text.strip())
         self._ensure_workers()
         turn_id = next(self._full_turn_numbers)
         now = time.monotonic()
+        emotion_state = tag_state or EmotionState(
+            emotion=CASE_TTS_DEFAULT_EMOTION,
+            intensity=CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+            reason="default_personality",
+        )
         metrics = {
             "turn_id": turn_id,
             "transcript_final_at": now,
             "llm_stream_start_at": now,
             "first_llm_chunk_at": now,
             "full_response_done_at": now,
+            "emotion": emotion_state.emotion,
+            "emotion_intensity": emotion_state.intensity,
+            "emotion_reason": emotion_state.reason,
         }
         await self.tts_text_queue.put(
             {"kind": "start", "turn_id": turn_id, "metrics": metrics}
@@ -410,6 +449,9 @@ class CASEVoice:
                     bool(item.get("stream_response")),
                     item.get("turn_id"),
                     item.get("sequence"),
+                    str(metrics.get("emotion", CASE_TTS_DEFAULT_EMOTION)),
+                    float(metrics.get("emotion_intensity", CASE_TTS_EMOTION_INTENSITY_DEFAULT)),
+                    str(metrics.get("emotion_reason", "default_personality")),
                 )
                 item["cache_hit"] = cache_hit
                 if CASE_TTS_DUMP_LAST_UTTERANCE and raw_audio is not None:
@@ -582,10 +624,18 @@ class CASEVoice:
         logger.info(summary)
         console.system(summary)
 
-    def _synthesize_raw_audio(self, text: str) -> tuple[bytes, int]:
+    def _synthesize_raw_audio(
+        self,
+        text: str,
+        *,
+        length_scale: float | None = None,
+    ) -> tuple[bytes, int]:
         if self.piper_onnx is not None:
             try:
-                audio, sample_rate = self.piper_onnx.synthesize(text)
+                audio, sample_rate = self.piper_onnx.synthesize(
+                    text,
+                    length_scale=length_scale,
+                )
                 return audio, sample_rate
             except Exception as exc:
                 logger.warning(
@@ -618,8 +668,49 @@ class CASEVoice:
         response_chunk: bool = False,
         turn_id: int | None = None,
         sequence: int | None = None,
+        emotion: str = CASE_TTS_DEFAULT_EMOTION,
+        intensity: float = CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+        emotion_reason: str = "default_personality",
     ) -> tuple[bytes | None, bytes, int, bool]:
-        cache_path = self._cache_path(text, response_chunk=response_chunk)
+        emotion_state = EmotionState(
+            emotion=str(emotion or CASE_TTS_DEFAULT_EMOTION),
+            intensity=float(intensity),
+            reason=str(emotion_reason or "default_personality"),
+        )
+        emotion_profile = blend_tts_emotion_profile(
+            emotion_state,
+            max_gain_db=CASE_TTS_EMOTION_MAX_GAIN_DB,
+        )
+        length_scale = (
+            emotion_profile.length_scale
+            if CASE_TTS_EMOTION_ENABLED and CASE_TTS_EMOTION_USE_LENGTH_SCALE
+            else None
+        )
+        gain_db = (
+            emotion_profile.gain_db
+            if CASE_TTS_EMOTION_ENABLED and CASE_TTS_EMOTION_USE_GAIN
+            else 0.0
+        )
+        cache_path = self._cache_path(
+            text,
+            response_chunk=response_chunk,
+            emotion=emotion_state.emotion,
+            intensity=emotion_state.intensity,
+            length_scale=length_scale,
+            gain_db=gain_db,
+        )
+        if CASE_TTS_EMOTION_ENABLE_PITCH_SHIFT:
+            logger.info("TTS_EMOTION: pitch_shift_requested_but_not_implemented")
+        logger.info(
+            "TTS_EMOTION_APPLY: turn=%s seq=%s emotion=%s intensity=%.2f "
+            "length_scale=%.2f gain_db=%.1f",
+            turn_id,
+            sequence,
+            emotion_state.emotion,
+            emotion_state.intensity,
+            length_scale if length_scale is not None else PIPER_LENGTH_SCALE,
+            gain_db,
+        )
         if cache_path and os.path.isfile(cache_path):
             try:
                 with wave.open(cache_path, "rb") as source:
@@ -638,7 +729,18 @@ class CASEVoice:
             except Exception as exc:
                 logger.warning("CASE_TTS_CACHE: ignored invalid entry %s: %s", cache_path, exc)
 
-        raw_audio, sample_rate = self._synthesize_raw_audio(text)
+        raw_audio, sample_rate = self._synthesize_raw_audio(
+            text,
+            length_scale=length_scale,
+        )
+        if CASE_TTS_EMOTION_ENABLED and CASE_TTS_EMOTION_USE_GAIN:
+            raw_audio, gain_stats = apply_gain_limited_pcm(raw_audio, gain_db)
+            if gain_stats.get("limited"):
+                logger.info(
+                    "TTS_EMOTION_LIMITER: peak_before=%.1f peak_after=%.1f",
+                    gain_stats["peak_before"],
+                    gain_stats["peak_after"],
+                )
         if response_chunk:
             processed = raw_audio
             if CASE_TTS_TRIM_SILENCE:
@@ -677,7 +779,16 @@ class CASEVoice:
                 logger.warning("CASE_TTS_CACHE: write failed path=%s: %s", cache_path, exc)
         return raw_audio, audio, sample_rate, False
 
-    def _cache_path(self, text: str, *, response_chunk: bool = False) -> str | None:
+    def _cache_path(
+        self,
+        text: str,
+        *,
+        response_chunk: bool = False,
+        emotion: str = CASE_TTS_DEFAULT_EMOTION,
+        intensity: float = CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+        length_scale: float | None = None,
+        gain_db: float = 0.0,
+    ) -> str | None:
         if not CASE_TTS_CACHE_ENABLED:
             return None
         normalized = " ".join(text.strip().lower().split())
@@ -704,6 +815,11 @@ class CASEVoice:
                 str(CASE_TTS_TRIM_SILENCE),
                 str(CASE_TTS_TRIM_THRESHOLD_DB),
                 str(CASE_TTS_TRIM_KEEP_MS),
+                str(CASE_TTS_EMOTION_ENABLED),
+                str(emotion),
+                f"{float(intensity):.3f}",
+                f"{float(length_scale or PIPER_LENGTH_SCALE):.3f}",
+                f"{float(gain_db):.3f}",
             )
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]

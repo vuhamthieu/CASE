@@ -44,6 +44,9 @@ from src.realtime.realtime_config import (
     CASE_TTS_MAX_CHARS_PER_CHUNK,
     CASE_TTS_MIN_CHARS_TO_GROUP,
     CASE_TTS_GROUP_SHORT_SENTENCES,
+    CASE_TTS_EMOTION_ENABLED,
+    CASE_TTS_DEFAULT_EMOTION,
+    CASE_TTS_EMOTION_INTENSITY_DEFAULT,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
     CASE_TTS_ENABLE_THINKING_FALLBACK,
@@ -72,6 +75,13 @@ from src.realtime.realtime_config import (
 )
 from src.realtime.realtime_persona import build_case_system_instruction
 from src.realtime.response_chunker import ResponseChunker as StreamingResponseChunker
+from src.persona.emotion import (
+    EmotionState,
+    build_emotion_user_message,
+    default_emotion_state,
+    detect_emotion,
+    parse_leading_emotion_tag,
+)
 from src.voice_pipeline.tts_safe_text import safe_tts_text
 
 try:
@@ -440,6 +450,48 @@ class CASEPersonality:
         await self._publish_and_yield("AI_SPEAK", THINKING_ACK_TEXT)
         await self._thinking_ack_done.wait()
 
+    @staticmethod
+    def _select_emotion(user_text: str) -> EmotionState:
+        if CASE_TTS_EMOTION_ENABLED:
+            state = detect_emotion(user_text)
+            if state.reason == "default_personality":
+                logger.info(
+                    "EMOTION_DEFAULT: emotion=%s intensity=%.2f",
+                    state.emotion,
+                    state.intensity,
+                )
+            else:
+                logger.info(
+                    "EMOTION_SELECT: emotion=%s intensity=%.2f reason=%s",
+                    state.emotion,
+                    state.intensity,
+                    state.reason,
+                )
+            return state
+        state = default_emotion_state(
+            emotion=CASE_TTS_DEFAULT_EMOTION,
+            intensity=CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+        )
+        logger.info(
+            "EMOTION_DEFAULT: emotion=%s intensity=%.2f",
+            state.emotion,
+            state.intensity,
+        )
+        return state
+
+    @staticmethod
+    def _emotion_from_metrics(metrics: dict) -> EmotionState:
+        return EmotionState(
+            emotion=str(metrics.get("emotion", CASE_TTS_DEFAULT_EMOTION)),
+            intensity=float(
+                metrics.get(
+                    "emotion_intensity",
+                    CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+                )
+            ),
+            reason=str(metrics.get("emotion_reason", "default_personality")),
+        )
+
     async def handle_user_input(self, user_text: str) -> None:
         if not isinstance(user_text, str) or not user_text.strip():
             logger.info("Ignoring empty USER_SPOKE payload.")
@@ -469,11 +521,15 @@ class CASEPersonality:
 
     async def _handle_streaming_response(self, user_text: str) -> bool:
         turn_id = next(self._turn_numbers)
+        emotion_state = self._select_emotion(user_text)
         metrics = {
             "turn_id": turn_id,
             "transcript_final_at": time.monotonic(),
             "realtime_hybrid": self.realtime_hybrid,
             "user_text": user_text,
+            "emotion": emotion_state.emotion,
+            "emotion_intensity": emotion_state.intensity,
+            "emotion_reason": emotion_state.reason,
             "allow_long_answer": self._allows_long_answer(user_text),
             "max_spoken_chars": self._max_spoken_chars(user_text),
             "max_tts_chunks": self._max_tts_chunks(user_text),
@@ -504,11 +560,12 @@ class CASEPersonality:
             "LLM_STREAM_WAITING_FOR_FIRST_TOKEN timeout=%.1fs",
             CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
         )
+        prompt_text = build_emotion_user_message(user_text, emotion_state)
         try:
             stream = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.chat_session.send_message_stream,
-                    user_text,
+                    prompt_text,
                 ),
                 timeout=CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
             )
@@ -709,7 +766,7 @@ class CASEPersonality:
                 try:
                     response = await asyncio.to_thread(
                         self.chat_session.send_message,
-                        user_text,
+                        build_emotion_user_message(user_text, self._emotion_from_metrics(metrics)),
                     )
                     if self.realtime_hybrid:
                         dialogue, action = (response.text or "").strip(), "IDLE"
@@ -755,6 +812,17 @@ class CASEPersonality:
         text: str,
         metrics: dict,
     ) -> int:
+        tag_state, text = parse_leading_emotion_tag(text)
+        if tag_state is not None:
+            metrics["emotion"] = tag_state.emotion
+            metrics["emotion_intensity"] = tag_state.intensity
+            metrics["emotion_reason"] = tag_state.reason
+            logger.info(
+                "EMOTION_SELECT: emotion=%s intensity=%.2f reason=%s",
+                tag_state.emotion,
+                tag_state.intensity,
+                tag_state.reason,
+            )
         original_text = text
         text = self._style_safe_response(
             text,
@@ -1116,7 +1184,7 @@ class CASEPersonality:
         try:
             response = await asyncio.to_thread(
                 self.chat_session.send_message,
-                user_text,
+                build_emotion_user_message(user_text, self._emotion_from_metrics(metrics)),
             )
             if self.realtime_hybrid:
                 dialogue, action = (response.text or "").strip(), "IDLE"
@@ -1189,10 +1257,11 @@ class CASEPersonality:
         return min(CASE_TTS_MAX_CHUNKS_PER_TURN, CASE_TTS_REALTIME_MAX_CHUNKS)
 
     async def _handle_full_response(self, user_text: str) -> None:
+        emotion_state = self._select_emotion(user_text)
         try:
             response = await asyncio.to_thread(
                 self.chat_session.send_message,
-                user_text,
+                build_emotion_user_message(user_text, emotion_state),
             )
             if self.realtime_hybrid:
                 dialogue, action = (response.text or "").strip(), "IDLE"
