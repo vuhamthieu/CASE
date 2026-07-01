@@ -8,27 +8,75 @@ from src.persona.emotion import (
     EmotionState,
     blend_tts_emotion_profile,
     build_emotion_user_message,
+    classify_emotion_with_llm,
     detect_emotion,
+    normalize_emotion_text,
+    parse_llm_emotion_json,
     parse_leading_emotion_tag,
 )
 from src.realtime.response_chunker import ResponseChunker
 
 
 class EmotionStage1Tests(unittest.TestCase):
+    def test_normalization_handles_contractions_fillers_and_vietnamese(self):
+        self.assertEqual(
+            normalize_emotion_text("Yeah, I'm so bored of you."),
+            "i am so bored of you",
+        )
+        self.assertEqual(
+            normalize_emotion_text("You're useless, CASE."),
+            "you are useless case",
+        )
+        self.assertEqual(
+            normalize_emotion_text("So... t chán mày rồi!"),
+            "t chán mày rồi",
+        )
+        self.assertEqual(
+            normalize_emotion_text("Yeah, I'm here.", strip_start_fillers=False),
+            "yeah i am here",
+        )
+
     def test_english_rejection_selects_angry(self):
-        for text in ("I'm bored of you", "you are boring", "I hate you", "shut up"):
+        for text in (
+            "Yeah, I'm so bored of you.",
+            "I am really tired of you.",
+            "you're useless",
+            "I hate you",
+            "nobody asked you",
+            "shut up",
+        ):
             with self.subTest(text=text):
                 state = detect_emotion(text)
                 self.assertEqual(state.emotion, "angry")
                 self.assertEqual(state.reason, "user_rejection")
                 self.assertGreaterEqual(state.intensity, 0.8)
+                self.assertGreaterEqual(state.confidence, 0.85)
+                self.assertEqual(state.source, "rules")
+                self.assertTrue(state.match)
 
     def test_vietnamese_rejection_selects_angry(self):
-        for text in ("t chán mày rồi", "tao chán mày rồi", "mày vô dụng"):
+        for text in ("t chán mày rồi", "tao chán mày rồi", "mày vô dụng", "im đi"):
             with self.subTest(text=text):
                 state = detect_emotion(text)
                 self.assertEqual(state.emotion, "angry")
                 self.assertEqual(state.reason, "user_rejection")
+
+    def test_requested_emotion_style_has_highest_priority(self):
+        for text, emotion in (
+            ("Can you can you be so angry for a moment?", "angry"),
+            ("speak angrily", "angry"),
+            ("nói kiểu tức giận", "angry"),
+            ("nói buồn hơn", "sad"),
+        ):
+            with self.subTest(text=text):
+                state = detect_emotion(text)
+                self.assertEqual(state.emotion, emotion)
+                self.assertEqual(state.reason, "requested_emotion_style")
+                self.assertEqual(state.source, "rules")
+
+        state = detect_emotion("Can you be angry and tell me a joke?")
+        self.assertEqual(state.emotion, "angry")
+        self.assertEqual(state.reason, "requested_emotion_style")
 
     def test_praise_selects_amused(self):
         for text in ("good job", "nice", "you are funny", "mày giỏi đấy", "hay đấy"):
@@ -50,10 +98,15 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertEqual(state.emotion, "deadpan")
         self.assertEqual(state.intensity, 0.35)
         self.assertEqual(state.reason, "default_personality")
+        self.assertEqual(state.confidence, 0.0)
+        self.assertEqual(state.source, "rules")
+        self.assertEqual(state.match, "no_rule_match")
 
-    def test_intensity_clamping(self):
+    def test_intensity_and_confidence_clamping(self):
         self.assertEqual(EmotionState("angry", 3.0).intensity, 1.0)
         self.assertEqual(EmotionState("sad", -1.0).intensity, 0.0)
+        self.assertEqual(EmotionState("sad", 0.5, confidence=2.0).confidence, 1.0)
+        self.assertEqual(EmotionState("sad", 0.5, confidence=-1.0).confidence, 0.0)
 
     def test_emotion_profile_blending(self):
         profile = blend_tts_emotion_profile(
@@ -82,6 +135,8 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state.emotion, "angry")
         self.assertEqual(state.intensity, 0.85)
+        self.assertEqual(state.source, "model_tag")
+        self.assertEqual(state.match, "leading_emotion_tag")
         self.assertEqual(text, "OH YEAH? FIND SOMEONE ELSE THEN.")
         self.assertNotIn("[emotion=", text)
 
@@ -100,6 +155,48 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertIn("Internal response style note", prompt)
         self.assertIn("offended", prompt)
         self.assertIn("User said: t chán mày rồi", prompt)
+
+    def test_llm_fallback_is_disabled_by_default(self):
+        self.assertFalse(defaults.CASE_EMOTION_LLM_FALLBACK)
+
+    def test_llm_emotion_json_parse_failures_fall_back(self):
+        self.assertIsNone(parse_llm_emotion_json("not json"))
+        self.assertIsNone(
+            parse_llm_emotion_json(
+                '{"emotion":"furious","intensity":0.8,"reason":"user_rejection","confidence":0.9}'
+            )
+        )
+        self.assertIsNone(
+            parse_llm_emotion_json(
+                '{"emotion":"angry","intensity":0.8,"reason":"user_rejection","confidence":0.2}'
+            )
+        )
+
+    def test_llm_emotion_json_accepts_and_clamps_valid_payload(self):
+        state = parse_llm_emotion_json(
+            '{"emotion":"angry","intensity":9,"reason":"user_rejection","confidence":2}'
+        )
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state.emotion, "angry")
+        self.assertEqual(state.reason, "user_rejection")
+        self.assertEqual(state.intensity, 1.0)
+        self.assertEqual(state.confidence, 1.0)
+        self.assertEqual(state.source, "llm")
+        self.assertEqual(state.match, "llm_classifier")
+
+    def test_llm_classifier_wrapper_uses_parser(self):
+        state = classify_emotion_with_llm(
+            "please sound sad",
+            lambda _: (
+                '{"emotion":"sad","intensity":0.6,'
+                '"reason":"requested_emotion_style","confidence":0.8}'
+            ),
+        )
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state.emotion, "sad")
+        self.assertEqual(state.reason, "requested_emotion_style")
 
     def test_smooth_chunking_still_works_with_emotion_enabled(self):
         self.assertTrue(defaults.CASE_TTS_SMOOTH_CHUNKS)

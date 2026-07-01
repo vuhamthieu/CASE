@@ -47,6 +47,10 @@ from src.realtime.realtime_config import (
     CASE_TTS_EMOTION_ENABLED,
     CASE_TTS_DEFAULT_EMOTION,
     CASE_TTS_EMOTION_INTENSITY_DEFAULT,
+    CASE_EMOTION_LLM_FALLBACK,
+    CASE_EMOTION_LLM_PROVIDER,
+    CASE_EMOTION_LLM_TIMEOUT_SEC,
+    CASE_EMOTION_LLM_MIN_CONFIDENCE,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
     CASE_TTS_ENABLE_THINKING_FALLBACK,
@@ -78,6 +82,7 @@ from src.realtime.response_chunker import ResponseChunker as StreamingResponseCh
 from src.persona.emotion import (
     EmotionState,
     build_emotion_user_message,
+    classify_emotion_with_llm,
     default_emotion_state,
     detect_emotion,
     parse_leading_emotion_tag,
@@ -450,34 +455,85 @@ class CASEPersonality:
         await self._publish_and_yield("AI_SPEAK", THINKING_ACK_TEXT)
         await self._thinking_ack_done.wait()
 
-    @staticmethod
-    def _select_emotion(user_text: str) -> EmotionState:
+    async def _select_emotion(self, user_text: str) -> EmotionState:
         if CASE_TTS_EMOTION_ENABLED:
             state = detect_emotion(user_text)
-            if state.reason == "default_personality":
-                logger.info(
-                    "EMOTION_DEFAULT: emotion=%s intensity=%.2f",
-                    state.emotion,
-                    state.intensity,
-                )
-            else:
-                logger.info(
-                    "EMOTION_SELECT: emotion=%s intensity=%.2f reason=%s",
-                    state.emotion,
-                    state.intensity,
-                    state.reason,
-                )
+            if (
+                CASE_EMOTION_LLM_FALLBACK
+                and state.confidence < CASE_EMOTION_LLM_MIN_CONFIDENCE
+            ):
+                llm_state = await self._classify_emotion_with_llm(user_text)
+                if llm_state is not None:
+                    self._log_emotion_state(llm_state)
+                    return llm_state
+            self._log_emotion_state(state)
             return state
         state = default_emotion_state(
             emotion=CASE_TTS_DEFAULT_EMOTION,
             intensity=CASE_TTS_EMOTION_INTENSITY_DEFAULT,
         )
+        self._log_emotion_state(state)
+        return state
+
+    @staticmethod
+    def _log_emotion_state(state: EmotionState) -> None:
+        if state.reason == "default_personality":
+            logger.info(
+                "EMOTION_DEFAULT: emotion=%s intensity=%.2f reason=no_rule_match source=%s",
+                state.emotion,
+                state.intensity,
+                state.source,
+            )
+            return
         logger.info(
-            "EMOTION_DEFAULT: emotion=%s intensity=%.2f",
+            "EMOTION_SELECT: emotion=%s intensity=%.2f reason=%s confidence=%.2f "
+            "source=%s match=%s",
             state.emotion,
             state.intensity,
+            state.reason,
+            state.confidence,
+            state.source,
+            state.match,
         )
-        return state
+
+    async def _classify_emotion_with_llm(self, user_text: str) -> EmotionState | None:
+        if CASE_EMOTION_LLM_PROVIDER != "gemini":
+            logger.info(
+                "EMOTION_LLM_CLASSIFY_FALLBACK: reason=unsupported_provider provider=%s",
+                CASE_EMOTION_LLM_PROVIDER,
+            )
+            return None
+
+        prompt = (
+            "Classify the user's emotional intent toward CASE. Return strict JSON only. "
+            "Allowed emotions: neutral, deadpan, amused, sarcastic, annoyed, angry, sad, excited. "
+            "Allowed reasons: default_personality, user_rejection, requested_emotion_style, "
+            "user_praise, user_sadness, humor_request, ambiguous. "
+            "Schema: {\"emotion\":\"deadpan\",\"intensity\":0.35,\"reason\":\"ambiguous\","
+            "\"confidence\":0.0}. User text: "
+            f"{user_text!r}"
+        )
+
+        def _call_classifier(_: str) -> str:
+            response = self.client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+            )
+            return str(getattr(response, "text", "") or "")
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    classify_emotion_with_llm,
+                    user_text,
+                    _call_classifier,
+                    min_confidence=CASE_EMOTION_LLM_MIN_CONFIDENCE,
+                ),
+                timeout=max(0.1, CASE_EMOTION_LLM_TIMEOUT_SEC),
+            )
+        except asyncio.TimeoutError:
+            logger.info("EMOTION_LLM_CLASSIFY_FALLBACK: reason=timeout")
+            return None
 
     @staticmethod
     def _emotion_from_metrics(metrics: dict) -> EmotionState:
@@ -490,6 +546,9 @@ class CASEPersonality:
                 )
             ),
             reason=str(metrics.get("emotion_reason", "default_personality")),
+            confidence=float(metrics.get("emotion_confidence", 0.0)),
+            source=str(metrics.get("emotion_source", "rules")),
+            match=str(metrics.get("emotion_match", "")),
         )
 
     async def handle_user_input(self, user_text: str) -> None:
@@ -521,7 +580,7 @@ class CASEPersonality:
 
     async def _handle_streaming_response(self, user_text: str) -> bool:
         turn_id = next(self._turn_numbers)
-        emotion_state = self._select_emotion(user_text)
+        emotion_state = await self._select_emotion(user_text)
         metrics = {
             "turn_id": turn_id,
             "transcript_final_at": time.monotonic(),
@@ -530,6 +589,9 @@ class CASEPersonality:
             "emotion": emotion_state.emotion,
             "emotion_intensity": emotion_state.intensity,
             "emotion_reason": emotion_state.reason,
+            "emotion_confidence": emotion_state.confidence,
+            "emotion_source": emotion_state.source,
+            "emotion_match": emotion_state.match,
             "allow_long_answer": self._allows_long_answer(user_text),
             "max_spoken_chars": self._max_spoken_chars(user_text),
             "max_tts_chunks": self._max_tts_chunks(user_text),
@@ -817,12 +879,10 @@ class CASEPersonality:
             metrics["emotion"] = tag_state.emotion
             metrics["emotion_intensity"] = tag_state.intensity
             metrics["emotion_reason"] = tag_state.reason
-            logger.info(
-                "EMOTION_SELECT: emotion=%s intensity=%.2f reason=%s",
-                tag_state.emotion,
-                tag_state.intensity,
-                tag_state.reason,
-            )
+            metrics["emotion_confidence"] = tag_state.confidence
+            metrics["emotion_source"] = tag_state.source
+            metrics["emotion_match"] = tag_state.match
+            self._log_emotion_state(tag_state)
         original_text = text
         text = self._style_safe_response(
             text,
@@ -1257,7 +1317,7 @@ class CASEPersonality:
         return min(CASE_TTS_MAX_CHUNKS_PER_TURN, CASE_TTS_REALTIME_MAX_CHUNKS)
 
     async def _handle_full_response(self, user_text: str) -> None:
-        emotion_state = self._select_emotion(user_text)
+        emotion_state = await self._select_emotion(user_text)
         try:
             response = await asyncio.to_thread(
                 self.chat_session.send_message,

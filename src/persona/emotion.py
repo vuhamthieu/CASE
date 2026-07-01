@@ -1,10 +1,15 @@
-"""Lightweight deterministic emotion state for CASE voice/personality."""
+"""Hybrid emotion routing for CASE voice/personality."""
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
+from typing import Callable
 
+
+logger = logging.getLogger(__name__)
 
 VALID_EMOTIONS = {
     "neutral",
@@ -17,17 +22,33 @@ VALID_EMOTIONS = {
     "excited",
 }
 
+VALID_REASONS = {
+    "default_personality",
+    "user_rejection",
+    "requested_emotion_style",
+    "user_praise",
+    "user_sadness",
+    "humor_request",
+    "ambiguous",
+}
+
 
 @dataclass(frozen=True)
 class EmotionState:
     emotion: str = "deadpan"
     intensity: float = 0.35
     reason: str = "default_personality"
+    confidence: float = 1.0
+    source: str = "rules"
+    match: str = ""
 
     def __post_init__(self) -> None:
         emotion = self.emotion if self.emotion in VALID_EMOTIONS else "deadpan"
+        reason = self.reason if self.reason in VALID_REASONS else "ambiguous"
         object.__setattr__(self, "emotion", emotion)
-        object.__setattr__(self, "intensity", clamp_intensity(self.intensity))
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "intensity", clamp_unit(self.intensity, default=0.35))
+        object.__setattr__(self, "confidence", clamp_unit(self.confidence, default=0.0))
 
 
 @dataclass(frozen=True)
@@ -48,21 +69,62 @@ TTS_EMOTION_PROFILES = {
 }
 
 
-def clamp_intensity(value: float) -> float:
+def clamp_unit(value: float, *, default: float) -> float:
     try:
         numeric = float(value)
     except (TypeError, ValueError):
-        numeric = 0.35
+        numeric = default
     return max(0.0, min(1.0, numeric))
 
 
-def normalize_emotion_text(text: str) -> str:
-    normalized = re.sub(r"[^\w\s']+", " ", str(text).lower(), flags=re.UNICODE)
-    return " ".join(normalized.split())
+def clamp_intensity(value: float) -> float:
+    return clamp_unit(value, default=0.35)
 
 
-def _contains_any(cleaned: str, phrases: tuple[str, ...]) -> bool:
-    return any(phrase in cleaned for phrase in phrases)
+_CONTRACTIONS = (
+    (r"\bi'm\b", "i am"),
+    (r"\bim\b", "i am"),
+    (r"\byou're\b", "you are"),
+    (r"\byoure\b", "you are"),
+    (r"\bdon't\b", "do not"),
+    (r"\bcant\b", "can not"),
+    (r"\bcan't\b", "can not"),
+)
+_START_FILLERS = {"yeah", "uh", "um", "like", "so"}
+
+
+def normalize_emotion_text(text: str, *, strip_start_fillers: bool = True) -> str:
+    raw = str(text or "")
+    normalized = raw.lower()
+    for pattern, replacement in _CONTRACTIONS:
+        normalized = re.sub(pattern, replacement, normalized)
+    normalized = re.sub(r"[^\w\s]+", " ", normalized, flags=re.UNICODE)
+    words = normalized.split()
+    if strip_start_fillers:
+        while words and words[0] in _START_FILLERS:
+            words.pop(0)
+    normalized = " ".join(words)
+    logger.debug("EMOTION_NORMALIZED: raw=%r normalized=%r", raw, normalized)
+    return normalized
+
+
+def _state(
+    emotion: str,
+    intensity: float,
+    reason: str,
+    *,
+    confidence: float,
+    match: str,
+    source: str = "rules",
+) -> EmotionState:
+    return EmotionState(
+        emotion=emotion,
+        intensity=intensity,
+        reason=reason,
+        confidence=confidence,
+        source=source,
+        match=match,
+    )
 
 
 def default_emotion_state(
@@ -70,69 +132,107 @@ def default_emotion_state(
     emotion: str = "deadpan",
     intensity: float = 0.35,
     reason: str = "default_personality",
+    confidence: float = 0.0,
+    source: str = "rules",
+    match: str = "no_rule_match",
 ) -> EmotionState:
-    return EmotionState(emotion=emotion, intensity=intensity, reason=reason)
+    return EmotionState(
+        emotion=emotion,
+        intensity=intensity,
+        reason=reason,
+        confidence=confidence,
+        source=source,
+        match=match,
+    )
+
+
+def _requested_style(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:be|act|sound)\s+(?:so\s+|really\s+)?angry\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.82, match="english_angry_style")
+    if re.search(r"\bspeak\s+(?:angrily|angry|louder)\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.80, match="english_angry_speak")
+    if re.search(r"\bsay it\s+angry\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.80, match="english_angry_say_it")
+    if re.search(r"\bsound\s+excited\b", cleaned):
+        return _state("excited", 0.68, "requested_emotion_style", confidence=0.78, match="english_excited_style")
+    if re.search(r"\bsound\s+sad\b", cleaned):
+        return _state("sad", 0.65, "requested_emotion_style", confidence=0.78, match="english_sad_style")
+    if re.search(r"\bnói\s+(?:giận|kiểu tức giận|gắt)(?:\s+lên)?\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.82, match="vietnamese_angry_style")
+    if re.search(r"\bnói\s+buồn\s+hơn\b", cleaned):
+        return _state("sad", 0.65, "requested_emotion_style", confidence=0.80, match="vietnamese_sad_style")
+    if re.search(r"\bnói\s+vui\s+hơn\b", cleaned):
+        return _state("excited", 0.65, "requested_emotion_style", confidence=0.76, match="vietnamese_excited_style")
+    if re.search(r"\bnói\s+to\s+hơn\b", cleaned):
+        return _state("excited", 0.62, "requested_emotion_style", confidence=0.75, match="vietnamese_louder_style")
+    return None
+
+
+def _user_rejection(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:bored|tired|sick)\s+(?:of|with)\s+(?:you|case)\b", cleaned):
+        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="bored_of_you")
+    if re.search(r"\b(?:i am\s+)?(?:really\s+|so\s+)?(?:bored|tired|sick)\s+(?:of|with)\s+(?:you|case)\b", cleaned):
+        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="bored_of_you")
+    if re.search(r"\b(?:hate|dislike)\s+(?:you|case)\b", cleaned):
+        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="hate_you")
+    if re.search(r"\b(?:you|case)\s+(?:are\s+)?(?:boring|useless|stupid|dumb|annoying)\b", cleaned):
+        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="you_are_insult")
+    if re.search(r"\b(?:shut up|stop talking|nobody asked you)\b", cleaned):
+        return _state("angry", 0.82, "user_rejection", confidence=0.88, match="dismissive_command")
+    if re.search(r"\b(?:chán|ghét|bực|khó chịu)\b.*\b(?:mày|bạn|case|cậu)\b", cleaned):
+        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="vietnamese_rejection")
+    if re.search(r"\b(?:mày|bạn|case|cậu)\b.*\b(?:chán|vô dụng|ngu|phiền)\b", cleaned):
+        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="vietnamese_you_insult")
+    if re.search(r"\b(?:im đi|i am đi|câm đi)\b", cleaned):
+        return _state("angry", 0.82, "user_rejection", confidence=0.88, match="vietnamese_shut_up")
+    return None
+
+
+def _user_sadness(cleaned: str) -> EmotionState | None:
+    if re.search(r"\bi am\s+(?:sad|tired|stressed)\b", cleaned):
+        return _state("sad", 0.65, "user_sadness", confidence=0.82, match="english_user_feeling")
+    if re.search(r"\bi feel bad\b", cleaned):
+        return _state("sad", 0.65, "user_sadness", confidence=0.82, match="english_feel_bad")
+    if re.search(r"\b(?:hôm nay tao buồn|mình buồn quá|tao mệt|mình mệt quá)\b", cleaned):
+        return _state("sad", 0.68, "user_sadness", confidence=0.82, match="vietnamese_sadness")
+    return None
+
+
+def _user_praise(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:good job|nice|well done)\b", cleaned):
+        return _state("amused", 0.62, "user_praise", confidence=0.80, match="short_praise")
+    if re.search(r"\byou are\s+(?:funny|smart)\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.82, match="you_are_praise")
+    if re.search(r"\b(?:mày giỏi|hay đấy|tốt đấy)\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="vietnamese_praise")
+    return None
+
+
+def _humor_request(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:tell me a joke|roast me|say something funny|make fun of me)\b", cleaned):
+        return _state("sarcastic", 0.65, "humor_request", confidence=0.82, match="english_humor_request")
+    if re.search(r"\b(?:kể chuyện cười|khịa tao đi)\b", cleaned):
+        return _state("sarcastic", 0.65, "humor_request", confidence=0.80, match="vietnamese_humor_request")
+    return None
+
+
+_RULES = (
+    _requested_style,
+    _user_rejection,
+    _user_sadness,
+    _user_praise,
+    _humor_request,
+)
 
 
 def detect_emotion(text: str) -> EmotionState:
     cleaned = normalize_emotion_text(text)
-    if not cleaned or len(cleaned) < 2:
+    if not cleaned:
         return default_emotion_state()
-
-    rejection = (
-        "t chán mày rồi",
-        "tao chán mày rồi",
-        "mình chán mày rồi",
-        "toi chan may roi",
-        "tao chan may roi",
-        "i'm bored of you",
-        "im bored of you",
-        "i am bored of you",
-        "you are boring",
-        "i hate you",
-        "mày vô dụng",
-        "may vo dung",
-        "you are useless",
-        "shut up",
-    )
-    if _contains_any(cleaned, rejection):
-        return EmotionState("angry", 0.85, "user_rejection")
-
-    praise = (
-        "good job",
-        "nice",
-        "you are funny",
-        "mày giỏi đấy",
-        "may gioi day",
-        "hay đấy",
-        "hay day",
-    )
-    if _contains_any(cleaned, praise):
-        return EmotionState("amused", 0.65, "user_praise")
-
-    sadness = (
-        "i'm sad",
-        "im sad",
-        "i'm tired",
-        "im tired",
-        "i feel bad",
-        "hôm nay tao buồn",
-        "hom nay tao buon",
-        "mình buồn quá",
-        "minh buon qua",
-    )
-    if _contains_any(cleaned, sadness):
-        return EmotionState("sad", 0.65, "user_sadness")
-
-    humor = (
-        "tell me a joke",
-        "roast me",
-        "say something funny",
-        "tell me something funny",
-    )
-    if _contains_any(cleaned, humor):
-        return EmotionState("sarcastic", 0.65, "humor_request")
-
+    for detector in _RULES:
+        state = detector(cleaned)
+        if state is not None:
+            return state
     return default_emotion_state()
 
 
@@ -146,9 +246,7 @@ def emotion_prompt_instruction(state: EmotionState) -> str:
     if state.emotion == "amused":
         return "Respond with amused confidence. Short, dry, slightly smug."
     if state.emotion == "sad":
-        return (
-            "Respond more softly and supportively. Still sound like CASE, but less harsh."
-        )
+        return "Respond more softly and supportively. Still sound like CASE, but less harsh."
     if state.emotion == "excited":
         return "Respond with brief energized confidence. Stay concise and useful."
     if state.emotion == "sarcastic":
@@ -196,7 +294,10 @@ def parse_leading_emotion_tag(text: str) -> tuple[EmotionState | None, str]:
                 EmotionState(
                     emotion=emotion,
                     intensity=0.35 if intensity is None else float(intensity),
-                    reason="model_emotion_tag",
+                    reason="ambiguous",
+                    confidence=0.80,
+                    source="model_tag",
+                    match="leading_emotion_tag",
                 ),
                 match.group("text").strip(),
             )
@@ -205,3 +306,57 @@ def parse_leading_emotion_tag(text: str) -> tuple[EmotionState | None, str]:
     if malformed:
         return None, malformed.group("text").strip()
     return None, source.strip()
+
+
+def parse_llm_emotion_json(
+    payload: str,
+    *,
+    min_confidence: float = 0.70,
+) -> EmotionState | None:
+    try:
+        data = json.loads(str(payload))
+    except json.JSONDecodeError:
+        logger.info("EMOTION_LLM_CLASSIFY_FALLBACK: reason=parse_error")
+        return None
+    emotion = str(data.get("emotion", "")).strip().lower()
+    reason = str(data.get("reason", "")).strip().lower()
+    confidence = clamp_unit(data.get("confidence", 0.0), default=0.0)
+    if emotion not in VALID_EMOTIONS or reason not in VALID_REASONS:
+        logger.info("EMOTION_LLM_CLASSIFY_FALLBACK: reason=invalid_label")
+        return None
+    if confidence < min_confidence:
+        logger.info("EMOTION_LLM_CLASSIFY_FALLBACK: reason=default_low_confidence")
+        return None
+    return EmotionState(
+        emotion=emotion,
+        intensity=clamp_intensity(data.get("intensity", 0.35)),
+        reason=reason,
+        confidence=confidence,
+        source="llm",
+        match="llm_classifier",
+    )
+
+
+def classify_emotion_with_llm(
+    text: str,
+    classifier: Callable[[str], str],
+    *,
+    min_confidence: float = 0.70,
+) -> EmotionState | None:
+    logger.info("EMOTION_LLM_CLASSIFY_START: text=%r", text)
+    try:
+        payload = classifier(text)
+    except Exception as exc:
+        logger.info("EMOTION_LLM_CLASSIFY_FALLBACK: reason=error error=%s", exc)
+        return None
+    state = parse_llm_emotion_json(payload, min_confidence=min_confidence)
+    if state is not None:
+        logger.info(
+            "EMOTION_LLM_CLASSIFY_RESULT: emotion=%s intensity=%.2f "
+            "confidence=%.2f reason=%s",
+            state.emotion,
+            state.intensity,
+            state.confidence,
+            state.reason,
+        )
+    return state
