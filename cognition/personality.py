@@ -60,7 +60,9 @@ from src.realtime.realtime_config import (
     CASE_REACTION_CLIPS_ENABLED,
     CASE_REACTION_CLIPS_DIR,
     CASE_REACTION_CLIPS_MANIFEST,
+    CASE_REACTION_DISABLED_CLIPS,
     CASE_REACTION_MIN_INTENSITY,
+    CASE_REACTION_MIN_DURATION_SEC,
     CASE_REACTION_COOLDOWN_SEC,
     CASE_REACTION_MAX_PER_TURN,
     CASE_REACTION_PLAY_BEFORE_MAIN_TTS,
@@ -456,12 +458,14 @@ class CASEPersonality:
         self._latest_turn_metrics: dict[str, float] = {}
         logger.info(
             "REACTION_CLIPS_CONFIG: enabled=%s dir=%s manifest=%s "
-            "min_intensity=%.2f cooldown=%.1f",
+            "min_intensity=%.2f min_duration=%.3f cooldown=%.1f disabled=%s",
             CASE_REACTION_CLIPS_ENABLED,
             CASE_REACTION_CLIPS_DIR,
             CASE_REACTION_CLIPS_MANIFEST,
             CASE_REACTION_MIN_INTENSITY,
+            CASE_REACTION_MIN_DURATION_SEC,
             CASE_REACTION_COOLDOWN_SEC,
+            CASE_REACTION_DISABLED_CLIPS,
         )
 
     async def _on_tts_end(self, payload) -> None:
@@ -525,6 +529,7 @@ class CASEPersonality:
             self._cancel_thinking_filler(turn_id, metrics, "reaction_clip")
         metrics["reaction_clip_id"] = selection.clip_id
         metrics["reaction_text"] = selection.text
+        metrics["reaction_tts_text"] = selection.tts_text
         metrics["reaction_path"] = str(selection.path)
         metrics["reaction_reason"] = selection.reason
         await self._publish_stream_start_once(turn_id, metrics)
@@ -534,6 +539,7 @@ class CASEPersonality:
                 "turn_id": turn_id,
                 "clip_id": selection.clip_id,
                 "text": selection.text,
+                "tts_text": selection.tts_text,
                 "path": str(selection.path),
                 "reason": selection.reason,
                 "emotion": selection.emotion,

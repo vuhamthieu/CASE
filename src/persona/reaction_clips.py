@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import numpy as np
 from src.audio.audio_format import convert_channels, load_wav_int16
 from src.audio.output_device import play_int16_mono
 from src.config import defaults
-from src.config.env import get_bool, get_float, get_int
+from src.config.env import get_bool, get_float, get_int, get_str
 from src.persona.emotion import EmotionState
 
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 class ReactionClip:
     clip_id: str
     text: str
+    tts_text: str
     emotion: str
     path: Path
 
@@ -32,6 +34,7 @@ class ReactionClip:
 class ReactionSelection:
     clip_id: str
     text: str
+    tts_text: str
     path: Path
     reason: str
     emotion: str
@@ -48,10 +51,32 @@ def resolve_runtime_path(path: str | Path, *, root: Path | None = None) -> Path:
     return (root or repo_root()) / candidate
 
 
+def disabled_clip_ids(value: str | None = None) -> set[str]:
+    raw = defaults.CASE_REACTION_DISABLED_CLIPS if value is None else value
+    if value is None:
+        raw = get_str("CASE_REACTION_DISABLED_CLIPS", defaults.CASE_REACTION_DISABLED_CLIPS)
+    return {
+        part.strip().lower()
+        for part in str(raw or "").split(",")
+        if part.strip()
+    }
+
+
+def wav_duration_sec(path: Path) -> float:
+    with wave.open(str(path), "rb") as source:
+        frames = source.getnframes()
+        rate = source.getframerate()
+    if rate <= 0:
+        return 0.0
+    return frames / float(rate)
+
+
 def load_reaction_manifest(
     manifest_path: str | Path,
     *,
     root: Path | None = None,
+    disabled_clips: set[str] | None = None,
+    min_duration_sec: float | None = None,
 ) -> dict[str, ReactionClip]:
     resolved = resolve_runtime_path(manifest_path, root=root)
     if not resolved.is_file():
@@ -70,21 +95,52 @@ def load_reaction_manifest(
         logger.warning("REACTION_CLIPS_LOADED: count=0 invalid_manifest=clips_not_dict")
         return {}
 
+    disabled = disabled_clip_ids() if disabled_clips is None else {item.lower() for item in disabled_clips}
+    min_duration = (
+        get_float("CASE_REACTION_MIN_DURATION_SEC", defaults.CASE_REACTION_MIN_DURATION_SEC)
+        if min_duration_sec is None
+        else float(min_duration_sec)
+    )
     for clip_id, item in raw_clips.items():
         if not isinstance(item, dict):
             continue
+        normalized_id = str(clip_id).strip().lower()
+        if item.get("enabled", True) is False:
+            logger.info("REACTION_CLIP_DISABLED: clip=%s", clip_id)
+            continue
+        if normalized_id in disabled:
+            logger.info("REACTION_CLIP_DISABLED: clip=%s", clip_id)
+            continue
         text = str(item.get("text", "")).strip()
+        tts_text = str(item.get("tts_text", text)).strip()
         emotion = str(item.get("emotion", "")).strip().lower()
         raw_path = str(item.get("path", "")).strip()
         if not clip_id or not text or not raw_path:
+            continue
+        if normalized_id == "one_sec" or text.casefold().strip(".!? ") == "one sec" or tts_text.casefold().strip(".!? ") == "one sec":
+            logger.info("REACTION_CLIP_DISABLED: clip=%s", clip_id)
             continue
         path = resolve_runtime_path(raw_path, root=root)
         if not path.is_file():
             logger.info("REACTION_CLIP_MISSING: clip=%s path=%s", clip_id, path)
             continue
+        try:
+            duration = wav_duration_sec(path)
+        except Exception as exc:
+            logger.info("REACTION_SKIP: reason=invalid_wav clip=%s error=%s", clip_id, exc)
+            continue
+        if duration < min_duration:
+            logger.info(
+                "REACTION_CLIP_TOO_SHORT: clip=%s duration=%.3f min=%.3f action=skip",
+                clip_id,
+                duration,
+                min_duration,
+            )
+            continue
         clips[str(clip_id)] = ReactionClip(
             clip_id=str(clip_id),
             text=text,
+            tts_text=tts_text or text,
             emotion=emotion,
             path=path,
         )
@@ -168,6 +224,7 @@ class ReactionClipSelector:
         return ReactionSelection(
             clip_id=clip.clip_id,
             text=clip.text,
+            tts_text=clip.tts_text,
             path=clip.path,
             reason=reason,
             emotion=clip.emotion,
@@ -177,11 +234,7 @@ class ReactionClipSelector:
         if state.reason == "user_rejection" and state.emotion == "angry":
             if state.intensity < 0.80:
                 return None
-            if state.intensity >= 0.90 and "find_someone_else" in self.clips:
-                return "find_someone_else", "angry_user_rejection"
-            if "oh_yeah" in self.clips:
-                return "oh_yeah", "angry_user_rejection"
-            return "seriously", "angry_user_rejection"
+            return self._first_available(("seriously", "fine"), "angry_user_rejection")
         if state.reason == "requested_emotion_style" and state.emotion == "angry":
             return "fine", "requested_angry_style"
         if (
@@ -200,6 +253,16 @@ class ReactionClipSelector:
             if state.intensity >= 0.60:
                 return "nice", "amused_praise"
             return None
+        return None
+
+    def _first_available(
+        self,
+        clip_ids: tuple[str, ...],
+        reason: str,
+    ) -> tuple[str, str] | None:
+        for clip_id in clip_ids:
+            if clip_id in self.clips:
+                return clip_id, reason
         return None
 
 

@@ -30,6 +30,14 @@ from src.persona.reaction_clips import resolve_runtime_path  # noqa: E402
 from src.voice_pipeline.piper_onnx_backend import PiperOnnxSynthesizer  # noqa: E402
 
 
+REACTION_LENGTH_SCALE = {
+    "angry": 1.05,
+    "annoyed": 1.03,
+    "sarcastic": 1.05,
+    "amused": 1.03,
+}
+
+
 def load_manifest(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -67,10 +75,17 @@ def main() -> int:
         raise SystemExit("invalid reaction manifest: clips must be an object")
 
     for clip_id, item in clips.items():
+        if item.get("enabled", True) is False:
+            print(f"skip disabled clip={clip_id}")
+            continue
         text = str(item.get("text", "")).strip()
+        tts_text = str(item.get("tts_text", text)).strip()
         emotion = str(item.get("emotion", "deadpan")).strip().lower()
         path = resolve_runtime_path(str(item.get("path", "")), root=ROOT)
-        if not text or not path:
+        if not text or not tts_text or not path:
+            continue
+        if str(clip_id).strip().lower() == "one_sec" or text.casefold().strip(".!? ") == "one sec" or tts_text.casefold().strip(".!? ") == "one sec":
+            print(f"skip disabled clip={clip_id}")
             continue
         if path.exists() and not args.force:
             print(f"skip existing clip={clip_id} path={path}")
@@ -88,9 +103,10 @@ def main() -> int:
             state,
             max_gain_db=defaults.CASE_TTS_EMOTION_MAX_GAIN_DB,
         )
+        length_scale = REACTION_LENGTH_SCALE.get(emotion, max(1.0, profile.length_scale))
         audio, sample_rate = synthesizer.synthesize(
-            text,
-            length_scale=profile.length_scale,
+            tts_text,
+            length_scale=length_scale,
         )
         audio, _gain_stats = apply_gain_limited_pcm(audio, profile.gain_db)
         audio, _trim_stats = trim_tts_silence_pcm(
@@ -102,7 +118,8 @@ def main() -> int:
         audio = fade_tts_pcm(audio, sample_rate=sample_rate)
         duration = write_wav(path, audio, sample_rate)
         print(
-            f'generated clip={clip_id} text="{text}" emotion={emotion} '
+            f'generated clip={clip_id} text="{text}" tts_text="{tts_text}" '
+            f"emotion={emotion} length_scale={length_scale:.2f} "
             f"path={path} duration={duration:.2f}s"
         )
 

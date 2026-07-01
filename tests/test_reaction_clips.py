@@ -30,13 +30,13 @@ class FakeBus:
         pass
 
 
-def write_silent_wav(path: Path) -> None:
+def write_silent_wav(path: Path, *, duration_sec: float = 1.0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
         output.setframerate(16000)
-        output.writeframes(b"\x00\x00" * 160)
+        output.writeframes(b"\x00\x00" * int(16000 * duration_sec))
 
 
 class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
@@ -49,10 +49,11 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
             ("wow", "Wow.", "sarcastic"),
             ("find_someone_else", "Find someone else then.", "angry"),
             ("nice", "Nice.", "amused"),
+            ("one_sec", "One sec.", "annoyed"),
         ):
             path = root / f"{clip_id}.wav"
             write_silent_wav(path)
-            clips[clip_id] = ReactionClip(clip_id, text, emotion, path)
+            clips[clip_id] = ReactionClip(clip_id, text, text, emotion, path)
         return clips
 
     def test_reaction_selection_rules(self):
@@ -65,7 +66,7 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
             cases = (
                 (
                     EmotionState("angry", 0.85, "user_rejection", confidence=0.9),
-                    {"oh_yeah", "seriously", "find_someone_else"},
+                    {"seriously", "fine"},
                 ),
                 (
                     EmotionState("angry", 0.70, "requested_emotion_style", confidence=0.8),
@@ -125,6 +126,26 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    def test_disabled_clips_are_not_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = self._clips(root)
+            selector = ReactionClipSelector(
+                {
+                    clip_id: clip
+                    for clip_id, clip in clips.items()
+                    if clip_id not in {"seriously", "fine"}
+                },
+                cooldown_sec=0.0,
+            )
+            self.assertIsNone(
+                selector.choose(
+                    EmotionState("angry", 0.85, "user_rejection", confidence=0.9),
+                    turn_id=1,
+                    now=1.0,
+                )
+            )
+
     def test_reaction_cooldown_prevents_repeated_clip(self):
         with tempfile.TemporaryDirectory() as tmp:
             selector = ReactionClipSelector(self._clips(Path(tmp)), cooldown_sec=8.0)
@@ -143,7 +164,9 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "clips": {
                             "valid": {
+                                "enabled": True,
                                 "text": "Valid.",
+                                "tts_text": "Valid.",
                                 "emotion": "amused",
                                 "path": "valid.wav",
                             },
@@ -158,10 +181,83 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            clips = load_reaction_manifest(manifest, root=root)
+            clips = load_reaction_manifest(manifest, root=root, disabled_clips=set())
 
             self.assertEqual(set(clips), {"valid"})
             self.assertEqual(clips["valid"].text, "Valid.")
+            self.assertEqual(clips["valid"].tts_text, "Valid.")
+
+    def test_manifest_disabled_env_and_one_sec_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("oh_yeah", "seriously", "one_sec"):
+                write_silent_wav(root / f"{name}.wav")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "clips": {
+                            "oh_yeah": {
+                                "enabled": False,
+                                "text": "OH YEAH?",
+                                "tts_text": "OH YEAH?",
+                                "emotion": "angry",
+                                "path": "oh_yeah.wav",
+                            },
+                            "seriously": {
+                                "text": "Seriously?",
+                                "tts_text": "Seriously?",
+                                "emotion": "annoyed",
+                                "path": "seriously.wav",
+                            },
+                            "one_sec": {
+                                "text": "One sec.",
+                                "tts_text": "One sec.",
+                                "emotion": "annoyed",
+                                "path": "one_sec.wav",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            clips = load_reaction_manifest(
+                manifest,
+                root=root,
+                disabled_clips={"one_sec"},
+            )
+
+            self.assertEqual(set(clips), {"seriously"})
+
+    def test_too_short_clips_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_silent_wav(root / "short.wav", duration_sec=0.20)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "clips": {
+                            "short": {
+                                "text": "Short.",
+                                "emotion": "amused",
+                                "path": "short.wav",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            clips = load_reaction_manifest(
+                manifest,
+                root=root,
+                disabled_clips=set(),
+                min_duration_sec=0.85,
+            )
+
+            self.assertEqual(clips, {})
 
     def test_invalid_manifest_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,7 +306,7 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
             topics = [topic for topic, _payload in bus.events]
             self.assertEqual(topics[0], "AI_SPEAK_STREAM_START")
             self.assertEqual(topics[1], "REACTION_CLIP_PLAY")
-            self.assertEqual(metrics["reaction_clip_id"], "oh_yeah")
+            self.assertIn(metrics["reaction_clip_id"], {"seriously", "fine"})
             self.assertTrue(task.cancelled() or task.cancelling())
 
     async def test_reaction_playback_failure_does_not_stop_turn_end(self):
