@@ -53,6 +53,7 @@ class SttFinalTimeboxTests(unittest.TestCase):
         engine.stt_plan = SimpleNamespace(
             final_chain=("vosk_lgraph", "vosk_small")
         )
+        engine.cloud_stt_final_mode = "local"
         engine.final_mode = "vosk_lgraph"
         engine.vosk_lgraph_model_path = Path(tempfile.mkdtemp())
         return engine

@@ -38,6 +38,12 @@ from src.realtime.realtime_config import (
     CASE_TTS_NORMAL_CHUNK_MAX_CHARS,
     CASE_TTS_NORMAL_CHUNK_TARGET_CHARS,
     CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
+    CASE_TTS_SMOOTH_CHUNKS,
+    CASE_TTS_FIRST_CHUNK_FAST,
+    CASE_TTS_MAX_SENTENCES_PER_CHUNK,
+    CASE_TTS_MAX_CHARS_PER_CHUNK,
+    CASE_TTS_MIN_CHARS_TO_GROUP,
+    CASE_TTS_GROUP_SHORT_SENTENCES,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
     CASE_TTS_ENABLE_THINKING_FALLBACK,
@@ -1076,6 +1082,13 @@ class CASEPersonality:
             tiny_chunk_max_chars=CASE_TTS_TINY_CHUNK_MAX_CHARS,
             single_chunk_under_chars=CASE_TTS_SINGLE_CHUNK_UNDER_CHARS,
             chunk_mode=CASE_TTS_CHUNK_MODE,
+            smooth_chunks=CASE_TTS_SMOOTH_CHUNKS,
+            first_chunk_fast=CASE_TTS_FIRST_CHUNK_FAST,
+            max_sentences_per_chunk=CASE_TTS_MAX_SENTENCES_PER_CHUNK,
+            max_chars_per_chunk=CASE_TTS_MAX_CHARS_PER_CHUNK,
+            min_chars_to_group=CASE_TTS_MIN_CHARS_TO_GROUP,
+            group_short_sentences=CASE_TTS_GROUP_SHORT_SENTENCES,
+            turn_id=int(metrics.get("turn_id", 0) or 0),
         )
 
     async def _fallback_full_response_stream(

@@ -32,6 +32,9 @@ from src.realtime.realtime_config import (
     CASE_TTS_REALTIME_MAX_CHUNKS,
     CASE_TTS_PLAYBACK_CONCURRENCY,
     CASE_TTS_SYNTH_CONCURRENCY,
+    CASE_TTS_TRIM_KEEP_MS,
+    CASE_TTS_TRIM_SILENCE,
+    CASE_TTS_TRIM_THRESHOLD_DB,
     CASE_THINKING_FILLER_DIR,
     CASE_THINKING_FILLER_KEYS,
     CASE_THINKING_FILLER_PREFERRED_KEYS,
@@ -81,6 +84,47 @@ def pad_and_fade_tts_pcm(
     if len(padded) < minimum:
         padded = np.pad(padded, (0, minimum - len(padded)))
     return padded.tobytes()
+
+
+def fade_tts_pcm(raw_audio: bytes, sample_rate: int = PIPER_SAMPLE_RATE) -> bytes:
+    samples = np.frombuffer(raw_audio, dtype="<i2").astype(np.float32)
+    if samples.size == 0:
+        return raw_audio
+    fade_in = min(samples.size, int(round(sample_rate * CASE_TTS_FADE_IN_MS / 1000)))
+    fade_out = min(samples.size, int(round(sample_rate * CASE_TTS_FADE_OUT_MS / 1000)))
+    if fade_in:
+        samples[:fade_in] *= np.linspace(0.0, 1.0, fade_in, dtype=np.float32)
+    if fade_out:
+        samples[-fade_out:] *= np.linspace(1.0, 0.0, fade_out, dtype=np.float32)
+    return np.clip(np.rint(samples), -32768, 32767).astype("<i2").tobytes()
+
+
+def trim_tts_silence_pcm(
+    raw_audio: bytes,
+    sample_rate: int,
+    *,
+    threshold_db: float = -45.0,
+    keep_ms: int = 35,
+) -> tuple[bytes, dict[str, float]]:
+    samples = np.frombuffer(raw_audio, dtype="<i2")
+    if samples.size < max(1, int(sample_rate * 0.08)):
+        return raw_audio, {"trimmed": 0.0}
+    threshold = max(1.0, 32767.0 * (10.0 ** (float(threshold_db) / 20.0)))
+    active = np.flatnonzero(np.abs(samples.astype(np.float32)) >= threshold)
+    if active.size == 0:
+        return raw_audio, {"trimmed": 0.0}
+    keep = int(round(sample_rate * max(0, int(keep_ms)) / 1000.0))
+    start = max(0, int(active[0]) - keep)
+    end = min(samples.size, int(active[-1]) + keep + 1)
+    if end <= start or end - start < int(sample_rate * 0.08):
+        return raw_audio, {"trimmed": 0.0}
+    trimmed = samples[start:end].astype("<i2").tobytes()
+    return trimmed, {
+        "trimmed": 1.0,
+        "lead_ms": start * 1000.0 / sample_rate,
+        "tail_ms": (samples.size - end) * 1000.0 / sample_rate,
+        "kept_ms": (end - start) * 1000.0 / sample_rate,
+    }
 
 
 class CASEVoice:
@@ -266,6 +310,7 @@ class CASEVoice:
                 "text": text,
                 "queued_at": payload.get("queued_at", time.monotonic()),
                 "metrics": payload["metrics"],
+                "stream_response": True,
             }
         )
 
@@ -362,6 +407,9 @@ class CASEVoice:
                     self._synthesis_executor,
                     self._prepare_tts_audio,
                     text,
+                    bool(item.get("stream_response")),
+                    item.get("turn_id"),
+                    item.get("sequence"),
                 )
                 item["cache_hit"] = cache_hit
                 if CASE_TTS_DUMP_LAST_UTTERANCE and raw_audio is not None:
@@ -565,9 +613,13 @@ class CASEVoice:
         return result.stdout, PIPER_SAMPLE_RATE
 
     def _prepare_tts_audio(
-        self, text: str
+        self,
+        text: str,
+        response_chunk: bool = False,
+        turn_id: int | None = None,
+        sequence: int | None = None,
     ) -> tuple[bytes | None, bytes, int, bool]:
-        cache_path = self._cache_path(text)
+        cache_path = self._cache_path(text, response_chunk=response_chunk)
         if cache_path and os.path.isfile(cache_path):
             try:
                 with wave.open(cache_path, "rb") as source:
@@ -580,12 +632,36 @@ class CASEVoice:
                     audio = source.readframes(source.getnframes())
                 if audio:
                     logger.info("CASE_TTS_CACHE: hit text=%r path=%s", text, cache_path)
+                    if response_chunk:
+                        logger.info("TTS_RESPONSE_PADDING: mode=normal padding_ms=0")
                     return None, audio, sample_rate, True
             except Exception as exc:
                 logger.warning("CASE_TTS_CACHE: ignored invalid entry %s: %s", cache_path, exc)
 
         raw_audio, sample_rate = self._synthesize_raw_audio(text)
-        audio = pad_and_fade_tts_pcm(raw_audio, sample_rate=sample_rate)
+        if response_chunk:
+            processed = raw_audio
+            if CASE_TTS_TRIM_SILENCE:
+                processed, trim_stats = trim_tts_silence_pcm(
+                    raw_audio,
+                    sample_rate,
+                    threshold_db=CASE_TTS_TRIM_THRESHOLD_DB,
+                    keep_ms=CASE_TTS_TRIM_KEEP_MS,
+                )
+                if trim_stats.get("trimmed"):
+                    logger.info(
+                        "TTS_SILENCE_TRIM: turn=%s seq=%s lead_ms=%.1f "
+                        "tail_ms=%.1f kept_ms=%.1f",
+                        turn_id,
+                        sequence,
+                        trim_stats["lead_ms"],
+                        trim_stats["tail_ms"],
+                        trim_stats["kept_ms"],
+                    )
+            audio = fade_tts_pcm(processed, sample_rate=sample_rate)
+            logger.info("TTS_RESPONSE_PADDING: mode=normal padding_ms=0")
+        else:
+            audio = pad_and_fade_tts_pcm(raw_audio, sample_rate=sample_rate)
         if cache_path:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -601,7 +677,7 @@ class CASEVoice:
                 logger.warning("CASE_TTS_CACHE: write failed path=%s: %s", cache_path, exc)
         return raw_audio, audio, sample_rate, False
 
-    def _cache_path(self, text: str) -> str | None:
+    def _cache_path(self, text: str, *, response_chunk: bool = False) -> str | None:
         if not CASE_TTS_CACHE_ENABLED:
             return None
         normalized = " ".join(text.strip().lower().split())
@@ -624,6 +700,10 @@ class CASEVoice:
                 str(CASE_TTS_FADE_IN_MS),
                 str(CASE_TTS_FADE_OUT_MS),
                 str(CASE_TTS_MIN_UTTERANCE_MS),
+                "response_chunk" if response_chunk else "safe_utterance",
+                str(CASE_TTS_TRIM_SILENCE),
+                str(CASE_TTS_TRIM_THRESHOLD_DB),
+                str(CASE_TTS_TRIM_KEEP_MS),
             )
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
