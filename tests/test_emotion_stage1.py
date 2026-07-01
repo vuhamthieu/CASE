@@ -320,6 +320,72 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertLessEqual(state.intensity, 0.50)
                 self.assertIsNone(memory.last_emotion)
 
+    def test_apology_to_case_deescalates_angry_memory(self):
+        for text in ("Sorry, CASE.", "my bad", "i apologize", "xin lỗi case"):
+            with self.subTest(text=text):
+                memory = EmotionMemory()
+                select_emotion_with_memory(
+                    "You're so boring.",
+                    memory,
+                    turn_id=1,
+                    now=10.0,
+                )
+                self.assertEqual(memory.last_emotion, "angry")
+
+                state = select_emotion_with_memory(
+                    text,
+                    memory,
+                    turn_id=2,
+                    now=12.0,
+                )
+
+                self.assertEqual(state.emotion, "deadpan")
+                self.assertEqual(state.reason, "emotion_deescalation")
+                self.assertEqual(state.source, "memory")
+                self.assertEqual(state.match, "apology")
+                self.assertLessEqual(state.intensity, 0.45)
+                self.assertIsNone(memory.last_emotion)
+
+    def test_apology_without_memory_does_not_invent_anger(self):
+        state = select_emotion_with_memory(
+            "Sorry, CASE.",
+            EmotionMemory(),
+            turn_id=1,
+            now=10.0,
+        )
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertEqual(state.reason, "default_personality")
+
+    def test_soft_meta_question_after_anger_uses_soft_match(self):
+        for text in (
+            "Are you not mad at me?",
+            "Are you mad at me?",
+            "Are you upset with me?",
+            "Did I make you angry?",
+            "Are you angry because of me?",
+        ):
+            with self.subTest(text=text):
+                memory = EmotionMemory()
+                select_emotion_with_memory(
+                    "You're so boring.",
+                    memory,
+                    turn_id=1,
+                    now=10.0,
+                )
+
+                state = select_emotion_with_memory(
+                    text,
+                    memory,
+                    turn_id=2,
+                    now=12.0,
+                )
+
+                self.assertIn(state.emotion, {"annoyed", "angry"})
+                self.assertEqual(state.reason, "emotion_meta_question")
+                self.assertEqual(state.source, "memory")
+                self.assertTrue(state.match.startswith("soft_"))
+
     def test_emotion_memory_exact_runtime_sequence(self):
         memory = EmotionMemory()
         state1 = select_emotion_with_memory(

@@ -101,6 +101,83 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(selection)
                 self.assertIn(selection.clip_id, expected)
 
+    def test_soft_meta_question_prefers_fine_not_seriously(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selector = ReactionClipSelector(
+                self._clips(Path(tmp)),
+                min_intensity=0.70,
+                cooldown_sec=0.0,
+            )
+
+            selection = selector.choose(
+                EmotionState(
+                    "annoyed",
+                    0.60,
+                    "emotion_meta_question",
+                    confidence=0.8,
+                    source="memory",
+                    match="soft_mad_at_me",
+                ),
+                turn_id=1,
+                now=1.0,
+            )
+
+            self.assertIsNotNone(selection)
+            self.assertEqual(selection.clip_id, "fine")
+            self.assertEqual(selection.reason, "soft_emotion_meta_question")
+
+    def test_soft_meta_question_skips_if_fine_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clips = {
+                clip_id: clip
+                for clip_id, clip in self._clips(Path(tmp)).items()
+                if clip_id != "fine"
+            }
+            selector = ReactionClipSelector(
+                clips,
+                min_intensity=0.70,
+                cooldown_sec=0.0,
+            )
+
+            selection = selector.choose(
+                EmotionState(
+                    "annoyed",
+                    0.60,
+                    "emotion_meta_question",
+                    confidence=0.8,
+                    source="memory",
+                    match="soft_mad_at_me",
+                ),
+                turn_id=1,
+                now=1.0,
+            )
+
+            self.assertIsNone(selection)
+
+    def test_hard_meta_question_can_still_select_seriously(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selector = ReactionClipSelector(
+                self._clips(Path(tmp)),
+                min_intensity=0.70,
+                cooldown_sec=0.0,
+            )
+
+            selection = selector.choose(
+                EmotionState(
+                    "annoyed",
+                    0.60,
+                    "emotion_meta_question",
+                    confidence=0.8,
+                    source="memory",
+                    match="are_you_angry",
+                ),
+                turn_id=1,
+                now=1.0,
+            )
+
+            self.assertIsNotNone(selection)
+            self.assertIn(selection.clip_id, {"seriously", "fine"})
+
     def test_reaction_selection_skips_default_sadness_and_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             selector = ReactionClipSelector(self._clips(Path(tmp)), cooldown_sec=0.0)

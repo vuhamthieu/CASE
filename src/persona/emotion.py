@@ -703,8 +703,28 @@ def _detect_deescalation(cleaned: str) -> str | None:
     return None
 
 
+def _detect_apology(cleaned: str) -> str | None:
+    patterns = (
+        (r"^sorry(?:\s+case)?$", "apology"),
+        (r"\bmy bad\b", "apology"),
+        (r"\bmy fault\b", "apology"),
+        (r"\bi apologize\b", "apology"),
+        (r"^xin lỗi(?:\s+case)?$", "apology"),
+        (r"\blỗi của tao\b", "apology"),
+        (r"\blỗi của mình\b", "apology"),
+    )
+    for pattern, name in patterns:
+        if re.search(pattern, cleaned):
+            return name
+    return None
+
+
 def _detect_emotion_meta_question(cleaned: str) -> str | None:
     patterns = (
+        (r"\bare you (?:not )?(?:mad|angry) at me\b", "soft_mad_at_me"),
+        (r"\bare you upset with me\b", "soft_upset_with_me"),
+        (r"\bdid i make you (?:angry|mad)\b", "soft_user_caused_emotion"),
+        (r"\bare you (?:mad|angry) because of me\b", "soft_user_caused_emotion"),
         (r"\bwhy are you (?:angry|mad|upset)\b", "why_are_you_angry"),
         (r"\bare you still (?:angry|mad|upset)\b", "are_you_still_angry"),
         (r"\bare you not (?:angry|mad|upset)\b", "are_you_not_angry"),
@@ -802,10 +822,15 @@ def _sarcastic_followup_state(memory: EmotionMemory, *, match: str) -> EmotionSt
 
 def _memory_deescalation_state(memory: EmotionMemory, *, match: str) -> EmotionState:
     previous = memory.last_emotion or "deadpan"
-    emotion = "annoyed" if previous in {"angry", "annoyed"} else "deadpan"
-    intensity = 0.45 if emotion == "annoyed" else 0.35
+    if match == "apology":
+        emotion = "deadpan"
+        intensity = 0.35
+    else:
+        emotion = "annoyed" if previous in {"angry", "annoyed"} else "deadpan"
+        intensity = 0.45 if emotion == "annoyed" else 0.35
     logger.info(
-        "EMOTION_DEESCALATE: from=%s to=%s intensity=%.2f",
+        "EMOTION_DEESCALATE: reason=%s from=%s to=%s intensity=%.2f",
+        match,
         previous,
         emotion,
         intensity,
@@ -848,6 +873,22 @@ def select_emotion_with_memory(
 
     cleaned = normalize_emotion_text(text)
     if meta_questions_enabled:
+        apology_match = _detect_apology(cleaned)
+        if apology_match:
+            logger.info("EMOTION_DEESCALATE: detected=true match=%s", apology_match)
+            if (
+                memory.last_emotion in {"angry", "annoyed"}
+                and memory.is_valid(
+                    turn_id=turn_id,
+                    now=now,
+                    ttl_turns=ttl_turns,
+                    ttl_sec=ttl_sec,
+                )
+            ):
+                state = _memory_deescalation_state(memory, match=apology_match)
+                memory.clear(reason="apology")
+                return state
+
         deescalation_match = _detect_deescalation(cleaned)
         if deescalation_match:
             logger.info("EMOTION_META_QUESTION: detected=true match=%s", deescalation_match)

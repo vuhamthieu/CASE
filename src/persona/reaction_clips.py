@@ -207,6 +207,13 @@ class ReactionClipSelector:
 
         selected = self._select_for_state(state)
         if selected is None:
+            if (
+                state.reason == "emotion_meta_question"
+                and state.source == "memory"
+                and str(state.match).startswith("soft_")
+            ):
+                logger.info("REACTION_SKIP: reason=soft_meta_question_no_clip")
+                return None
             logger.info("REACTION_SKIP: reason=no_matching_clip")
             return None
         clip_id, reason = selected
@@ -245,6 +252,8 @@ class ReactionClipSelector:
             and state.source == "memory"
             and state.emotion in {"annoyed", "angry"}
         ):
+            if str(state.match).startswith("soft_"):
+                return self._first_available(("fine",), "soft_emotion_meta_question")
             return ("seriously" if "seriously" in self.clips else "fine"), "anger_meta_question"
         if state.reason == "emotion_deescalation":
             return "fine", "emotion_deescalation"
