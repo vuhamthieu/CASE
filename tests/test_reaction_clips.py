@@ -14,6 +14,7 @@ from src.persona.emotion import EmotionState
 from src.persona.reaction_clips import (
     ReactionClip,
     ReactionClipSelector,
+    disabled_clip_ids,
     load_reaction_manifest,
     strip_leading_reaction_duplicate,
 )
@@ -229,6 +230,82 @@ class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(set(clips), {"seriously"})
+
+    def test_reaction_clip_blocklist_defaults_empty_and_legacy_alias_works(self):
+        self.assertEqual(defaults.CASE_REACTION_CLIP_BLOCKLIST, "")
+        self.assertEqual(defaults.CASE_REACTION_DISABLED_CLIPS, "")
+        self.assertEqual(disabled_clip_ids(""), set())
+
+        with patch.dict(
+            "os.environ",
+            {"CASE_REACTION_DISABLED_CLIPS": "seriously,fine"},
+            clear=False,
+        ):
+            self.assertEqual(disabled_clip_ids(), {"seriously", "fine"})
+
+    def test_manifest_disabled_oh_yeah_stays_disabled_without_env_blocklist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("oh_yeah", "seriously"):
+                write_silent_wav(root / f"{name}.wav")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "clips": {
+                            "oh_yeah": {
+                                "enabled": False,
+                                "text": "OH YEAH?",
+                                "emotion": "angry",
+                                "path": "oh_yeah.wav",
+                            },
+                            "seriously": {
+                                "text": "Seriously?",
+                                "emotion": "annoyed",
+                                "path": "seriously.wav",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            clips = load_reaction_manifest(
+                manifest,
+                root=root,
+                disabled_clips=set(),
+            )
+
+            self.assertEqual(set(clips), {"seriously"})
+
+    def test_one_sec_is_filler_but_not_reaction_clip(self):
+        self.assertIn("one_sec", defaults.CASE_THINKING_FILLER_KEYS)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_silent_wav(root / "one_sec.wav")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "clips": {
+                            "one_sec": {
+                                "text": "One sec.",
+                                "emotion": "annoyed",
+                                "path": "one_sec.wav",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            clips = load_reaction_manifest(
+                manifest,
+                root=root,
+                disabled_clips=set(),
+            )
+
+            self.assertEqual(clips, {})
 
     def test_too_short_clips_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:

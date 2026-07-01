@@ -41,6 +41,10 @@ from src.vision.vision_scheduler import (
 from src.cognition.intent_router import IntentRouter
 from src.realtime import resolve_voice_mode
 from src.realtime.realtime_config import (
+    CASE_CLOUD_STT_FALLBACK,
+    CASE_STT_ENDPOINT_BACKEND,
+    CASE_STT_FINAL_MODE,
+    CASE_STT_LOCAL_FINAL_BACKEND,
     CASE_STT_PROFILE,
     HYBRID_LATENCY_PROFILE,
     HYBRID_MUTE_MIC_DURING_TTS,
@@ -54,7 +58,6 @@ from src.realtime.realtime_config import (
     HYBRID_STT_REOPEN_SEC,
     HYBRID_STT_SILENCE_SEC,
     HYBRID_TEXT_TTS_STREAMING,
-    TRANSCRIPT_INPUT_BACKEND,
     VOICE_OUTPUT_BACKEND,
     resolve_voice_pipeline,
 )
@@ -250,8 +253,8 @@ async def boot_sequence():
         voice_mode == "realtime"
         and voice_pipeline == "hybrid_text_tts"
         and HYBRID_LATENCY_PROFILE == "fast"
-        and TRANSCRIPT_INPUT_BACKEND
-        in {"vosk_lgraph", "vosk_small", "sherpa_sensevoice", "local_vosk_fast"}
+        and CASE_STT_LOCAL_FINAL_BACKEND
+        in {"auto", "vosk_lgraph", "vosk_small", "sherpa_sensevoice", "sensevoice", "local_vosk_fast"}
     )
 
     # Instantiate core components
@@ -375,7 +378,11 @@ async def boot_sequence():
                 logger.info("PIPER_ONNX: active for CASE_TTS")
             logger.info("STT_PROFILE: %s", CASE_STT_PROFILE)
             logger.info("LATENCY_PROFILE: %s", HYBRID_LATENCY_PROFILE)
-            logger.info("STT_FINAL_MODE: %s", TRANSCRIPT_INPUT_BACKEND)
+            logger.info("STT_FINAL_MODE: %s", CASE_STT_FINAL_MODE)
+            logger.info("STT_ENDPOINT_MODE: %s", CASE_STT_ENDPOINT_BACKEND)
+            logger.info("STT_LOCAL_FINAL_BACKEND: %s", CASE_STT_LOCAL_FINAL_BACKEND)
+            if CASE_STT_FINAL_MODE == "cloud":
+                logger.info("STT_FINAL_FALLBACK: %s", CASE_CLOUD_STT_FALLBACK)
             logger.info("GEMINI_LIVE_NATIVE_AUDIO: disabled")
         logger.info(
             "VOICE_MODE: realtime pipeline=%s (local wake word, shared microphone stream)",

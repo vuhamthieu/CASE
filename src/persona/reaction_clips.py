@@ -52,9 +52,12 @@ def resolve_runtime_path(path: str | Path, *, root: Path | None = None) -> Path:
 
 
 def disabled_clip_ids(value: str | None = None) -> set[str]:
-    raw = defaults.CASE_REACTION_DISABLED_CLIPS if value is None else value
+    raw = defaults.CASE_REACTION_CLIP_BLOCKLIST if value is None else value
     if value is None:
-        raw = get_str("CASE_REACTION_DISABLED_CLIPS", defaults.CASE_REACTION_DISABLED_CLIPS)
+        raw = get_str(
+            "CASE_REACTION_CLIP_BLOCKLIST",
+            get_str("CASE_REACTION_DISABLED_CLIPS", defaults.CASE_REACTION_CLIP_BLOCKLIST),
+        )
     return {
         part.strip().lower()
         for part in str(raw or "").split(",")

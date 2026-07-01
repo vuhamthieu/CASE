@@ -1,4 +1,9 @@
-"""Stable, non-secret CASE runtime defaults safe to commit."""
+"""Stable, non-secret CASE runtime defaults safe to commit.
+
+Keep secrets and machine-specific choices in `.env`. Normal Pi runs should not
+need STT, emotion, reaction, wake-ack, or TTS chunking exports unless you are
+actively tuning a subsystem.
+"""
 
 CASE_VOICE_MODE = "classic"
 REALTIME_PROVIDER = "gemini_live"
@@ -34,13 +39,15 @@ AUDIO_SHORT_SOUND_THRESHOLD_SEC = 1.8
 AUDIO_SHORT_SOUND_EXTRA_TAIL_MS = 300
 GEMINI_LIVE_NATIVE_AUDIO_ENABLED = False
 CASE_STT_PROFILE = "balanced"
-CASE_STT_FINAL_BACKEND = "auto"
+CASE_STT_ENDPOINT_BACKEND = "vosk_small"
+CASE_STT_LOCAL_FINAL_BACKEND = "auto"
+CASE_STT_FINAL_BACKEND = CASE_STT_LOCAL_FINAL_BACKEND
 CASE_STT_FINAL_TIMEBOX_SEC = 2.5
 CASE_STT_LGRAPH_FINAL_TIMEOUT_SEC = CASE_STT_FINAL_TIMEBOX_SEC
 CASE_STT_ACCEPT_FAST_CANDIDATE_ON_TIMEOUT = True
 CASE_STT_GLOSSARY_REPAIR = True
 CASE_STT_GLOSSARY_PATH = "config/stt_domain_glossary.json"
-CASE_STT_FINAL_MODE = "cloud" # if use vosk, change to "local
+CASE_STT_FINAL_MODE = "cloud"
 CASE_CLOUD_STT_PROVIDER = "gemini"
 CASE_CLOUD_STT_MODEL = GEMINI_TEXT_MODEL
 CASE_CLOUD_STT_TIMEOUT_SEC = 8.0
@@ -202,7 +209,8 @@ CASE_EMOTION_META_QUESTIONS_ENABLED = True
 CASE_REACTION_CLIPS_ENABLED = True
 CASE_REACTION_CLIPS_DIR = "assets/audio/reactions/generated"
 CASE_REACTION_CLIPS_MANIFEST = "config/reaction_clips.json"
-CASE_REACTION_DISABLED_CLIPS = "oh_yeah,one_sec"
+CASE_REACTION_CLIP_BLOCKLIST = ""
+CASE_REACTION_DISABLED_CLIPS = CASE_REACTION_CLIP_BLOCKLIST
 CASE_REACTION_MIN_INTENSITY = 0.70
 CASE_REACTION_MIN_DURATION_SEC = 0.85
 CASE_REACTION_COOLDOWN_SEC = 8.0

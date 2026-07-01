@@ -116,6 +116,82 @@ class SttFinalTimeboxTests(unittest.TestCase):
             finally:
                 importlib.reload(realtime_config)
 
+    def test_canonical_stt_backend_names_default_and_alias_legacy_names(self):
+        import src.realtime.realtime_config as realtime_config
+
+        keys = {
+            "CASE_STT_ENDPOINT_BACKEND",
+            "CASE_STT_LOCAL_FINAL_BACKEND",
+            "CASE_STT_FINAL_BACKEND",
+            "TRANSCRIPT_INPUT_BACKEND",
+        }
+        with patch.dict("os.environ", {}, clear=False):
+            for key in keys:
+                os.environ.pop(key, None)
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_ENDPOINT_BACKEND, "vosk_small")
+                self.assertEqual(realtime_config.CASE_STT_LOCAL_FINAL_BACKEND, "auto")
+                self.assertEqual(realtime_config.CASE_STT_FINAL_BACKEND, "auto")
+                self.assertEqual(realtime_config.TRANSCRIPT_INPUT_BACKEND, "auto")
+            finally:
+                importlib.reload(realtime_config)
+
+    def test_legacy_stt_final_backend_alias_still_works(self):
+        import src.realtime.realtime_config as realtime_config
+
+        with patch.dict(
+            "os.environ",
+            {"CASE_STT_FINAL_BACKEND": "vosk_small"},
+            clear=False,
+        ):
+            os.environ.pop("CASE_STT_LOCAL_FINAL_BACKEND", None)
+            os.environ.pop("TRANSCRIPT_INPUT_BACKEND", None)
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_LOCAL_FINAL_BACKEND, "vosk_small")
+                self.assertEqual(realtime_config.CASE_STT_FINAL_BACKEND, "vosk_small")
+                self.assertEqual(realtime_config.TRANSCRIPT_INPUT_BACKEND, "vosk_small")
+            finally:
+                importlib.reload(realtime_config)
+
+    def test_legacy_transcript_input_backend_alias_still_works(self):
+        import src.realtime.realtime_config as realtime_config
+
+        with patch.dict(
+            "os.environ",
+            {"TRANSCRIPT_INPUT_BACKEND": "sensevoice"},
+            clear=False,
+        ):
+            os.environ.pop("CASE_STT_LOCAL_FINAL_BACKEND", None)
+            os.environ.pop("CASE_STT_FINAL_BACKEND", None)
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_LOCAL_FINAL_BACKEND, "sensevoice")
+                self.assertEqual(realtime_config.CASE_STT_FINAL_BACKEND, "sensevoice")
+            finally:
+                importlib.reload(realtime_config)
+
+    def test_canonical_stt_final_backend_wins_over_legacy(self):
+        import src.realtime.realtime_config as realtime_config
+
+        with patch.dict(
+            "os.environ",
+            {
+                "CASE_STT_LOCAL_FINAL_BACKEND": "vosk_small",
+                "CASE_STT_FINAL_BACKEND": "vosk_lgraph",
+                "TRANSCRIPT_INPUT_BACKEND": "sensevoice",
+            },
+            clear=False,
+        ):
+            importlib.reload(realtime_config)
+            try:
+                self.assertEqual(realtime_config.CASE_STT_LOCAL_FINAL_BACKEND, "vosk_small")
+                self.assertEqual(realtime_config.CASE_STT_FINAL_BACKEND, "vosk_small")
+                self.assertEqual(realtime_config.TRANSCRIPT_INPUT_BACKEND, "vosk_small")
+            finally:
+                importlib.reload(realtime_config)
+
     def test_clear_fast_intent_bypasses_slow_lgraph(self):
         engine = self.make_engine()
         self.executor = engine._final_stt_executor

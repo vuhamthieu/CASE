@@ -227,6 +227,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(defaults.GEMINI_LIVE_NATIVE_AUDIO_ENABLED)
         self.assertEqual(defaults.HYBRID_LATENCY_PROFILE, "fast")
         self.assertEqual(defaults.CASE_STT_PROFILE, "balanced")
+        self.assertEqual(defaults.CASE_STT_ENDPOINT_BACKEND, "vosk_small")
+        self.assertEqual(defaults.CASE_STT_LOCAL_FINAL_BACKEND, "auto")
         self.assertEqual(defaults.CASE_STT_FINAL_BACKEND, "auto")
         self.assertEqual(defaults.TRANSCRIPT_INPUT_BACKEND, "vosk_lgraph")
         self.assertEqual(defaults.HYBRID_STT_MAX_COMMAND_SEC, 8.0)
@@ -274,6 +276,9 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("STT_PROFILE: %s", main_source)
         self.assertIn("LATENCY_PROFILE: %s", main_source)
         self.assertIn("STT_FINAL_MODE: %s", main_source)
+        self.assertIn("STT_ENDPOINT_MODE: %s", main_source)
+        self.assertIn("STT_FINAL_FALLBACK: %s", main_source)
+        self.assertNotIn('logger.info("STT_FINAL_MODE: %s", TRANSCRIPT_INPUT_BACKEND)', main_source)
         self.assertNotIn(
             "HYBRID_LATENCY: profile=%s transcript_backend=%s",
             main_source,

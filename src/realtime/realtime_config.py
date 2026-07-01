@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from src.config import defaults
@@ -16,6 +17,36 @@ from src.config.env import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_legacy_env(legacy_name: str, canonical_name: str, *, ignored: bool = False) -> None:
+    action = "ignored" if ignored else "accepted"
+    logger.warning(
+        "CONFIG_DEPRECATED: %s is deprecated; use %s (%s)",
+        legacy_name,
+        canonical_name,
+        action,
+    )
+
+
+def _get_str_alias(
+    canonical_name: str,
+    canonical_default: str,
+    *legacy_names: str,
+) -> str:
+    canonical_value = os.getenv(canonical_name)
+    if canonical_value is not None:
+        for legacy_name in legacy_names:
+            if os.getenv(legacy_name) is not None:
+                _warn_legacy_env(legacy_name, canonical_name, ignored=True)
+        return canonical_value.strip()
+    for legacy_name in legacy_names:
+        legacy_value = os.getenv(legacy_name)
+        if legacy_value is not None:
+            _warn_legacy_env(legacy_name, canonical_name)
+            return legacy_value.strip()
+    return canonical_default
+
 
 CASE_VOICE_MODE = get_str("CASE_VOICE_MODE", defaults.CASE_VOICE_MODE).lower()
 REALTIME_PROVIDER = get_str("REALTIME_PROVIDER", defaults.REALTIME_PROVIDER).lower()
@@ -55,15 +86,20 @@ GEMINI_LIVE_NATIVE_AUDIO_ENABLED = get_bool(
     "GEMINI_LIVE_NATIVE_AUDIO_ENABLED",
     get_bool("GEMINI_LIVE_NATIVE_AUDIO", defaults.GEMINI_LIVE_NATIVE_AUDIO_ENABLED),
 )
-TRANSCRIPT_INPUT_BACKEND = get_str(
-    "TRANSCRIPT_INPUT_BACKEND", defaults.TRANSCRIPT_INPUT_BACKEND
+CASE_STT_ENDPOINT_BACKEND = get_str(
+    "CASE_STT_ENDPOINT_BACKEND", defaults.CASE_STT_ENDPOINT_BACKEND
 ).lower()
 CASE_STT_PROFILE = get_str(
     "CASE_STT_PROFILE", defaults.CASE_STT_PROFILE
 ).lower()
-CASE_STT_FINAL_BACKEND = get_str(
-    "CASE_STT_FINAL_BACKEND", defaults.CASE_STT_FINAL_BACKEND
+CASE_STT_LOCAL_FINAL_BACKEND = _get_str_alias(
+    "CASE_STT_LOCAL_FINAL_BACKEND",
+    defaults.CASE_STT_LOCAL_FINAL_BACKEND,
+    "CASE_STT_FINAL_BACKEND",
+    "TRANSCRIPT_INPUT_BACKEND",
 ).lower()
+CASE_STT_FINAL_BACKEND = CASE_STT_LOCAL_FINAL_BACKEND
+TRANSCRIPT_INPUT_BACKEND = CASE_STT_LOCAL_FINAL_BACKEND
 CASE_STT_FINAL_TIMEBOX_SEC = get_float(
     "CASE_STT_FINAL_TIMEBOX_SEC",
     get_float(
@@ -599,10 +635,12 @@ CASE_REACTION_CLIPS_MANIFEST = get_str(
     "CASE_REACTION_CLIPS_MANIFEST",
     defaults.CASE_REACTION_CLIPS_MANIFEST,
 )
-CASE_REACTION_DISABLED_CLIPS = get_str(
+CASE_REACTION_CLIP_BLOCKLIST = _get_str_alias(
+    "CASE_REACTION_CLIP_BLOCKLIST",
+    defaults.CASE_REACTION_CLIP_BLOCKLIST,
     "CASE_REACTION_DISABLED_CLIPS",
-    defaults.CASE_REACTION_DISABLED_CLIPS,
 )
+CASE_REACTION_DISABLED_CLIPS = CASE_REACTION_CLIP_BLOCKLIST
 CASE_REACTION_MIN_INTENSITY = get_float(
     "CASE_REACTION_MIN_INTENSITY",
     defaults.CASE_REACTION_MIN_INTENSITY,
