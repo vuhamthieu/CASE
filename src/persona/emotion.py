@@ -238,6 +238,8 @@ def default_emotion_state(
 
 
 def _requested_style(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:do not|don t|dont)\s+be\s+angry\b", cleaned):
+        return None
     if re.search(
         r"\b(?:can you\s+)?(?:get|be)\s+angry\s+(?:for|or)\s+(?:a\s+)?moment\b",
         cleaned,
@@ -351,6 +353,9 @@ def _detect_deescalation(cleaned: str) -> str | None:
         (r"\bcalm down\b", "calm_down"),
         (r"\bdo not be angry\b", "do_not_be_angry"),
         (r"\bdon t be angry\b", "dont_be_angry"),
+        (r"\bdo not angry\b", "do_not_angry"),
+        (r"\bdont angry\b", "dont_angry"),
+        (r"\bdon t angry\b", "dont_angry"),
         (r"\bđừng giận\b", "vietnamese_dont_be_angry"),
         (r"\bbình tĩnh đi\b", "vietnamese_calm_down"),
     )
@@ -365,7 +370,9 @@ def _detect_emotion_meta_question(cleaned: str) -> str | None:
         (r"\bwhy are you (?:angry|mad|upset)\b", "why_are_you_angry"),
         (r"\bare you still (?:angry|mad|upset)\b", "are_you_still_angry"),
         (r"\bare you not (?:angry|mad|upset)\b", "are_you_not_angry"),
+        (r"\byou are not (?:angry|mad|upset)\b", "you_are_not_angry"),
         (r"\byou not (?:angry|mad|upset)\b", "you_not_angry"),
+        (r"^not (?:angry|mad|upset)$", "not_angry"),
         (r"\bare you (?:angry|mad|upset)\b", "are_you_angry"),
         (r"\byou (?:angry|mad|upset)\b", "you_angry"),
         (r"\bmày không giận à\b", "vietnamese_you_not_angry"),

@@ -212,7 +212,13 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertEqual(memory.last_emotion, "angry")
 
     def test_emotion_meta_question_carries_angry_memory(self):
-        for text in ("Are you not angry?", "you not angry", "mày không giận à"):
+        for text in (
+            "Are you not angry?",
+            "you not angry",
+            "you're not angry",
+            "not angry",
+            "mày không giận à",
+        ):
             with self.subTest(text=text):
                 memory = EmotionMemory()
                 select_emotion_with_memory(
@@ -234,6 +240,31 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertEqual(state.source, "memory")
                 self.assertGreaterEqual(state.intensity, 0.45)
                 self.assertLessEqual(state.intensity, 0.75)
+
+    def test_fuzzy_deescalation_from_runtime_transcript(self):
+        for text in ("Do not angry.", "dont angry", "don't angry", "do not be angry", "don't be angry"):
+            with self.subTest(text=text):
+                memory = EmotionMemory()
+                select_emotion_with_memory(
+                    "I am so bored of you.",
+                    memory,
+                    turn_id=1,
+                    now=10.0,
+                )
+
+                state = select_emotion_with_memory(
+                    text,
+                    memory,
+                    turn_id=2,
+                    now=12.0,
+                )
+
+                self.assertIn(state.emotion, {"annoyed", "deadpan"})
+                self.assertEqual(state.reason, "emotion_deescalation")
+                self.assertEqual(state.source, "memory")
+                self.assertGreaterEqual(state.intensity, 0.35)
+                self.assertLessEqual(state.intensity, 0.50)
+                self.assertIsNone(memory.last_emotion)
 
     def test_emotion_memory_exact_runtime_sequence(self):
         memory = EmotionMemory()
@@ -267,15 +298,17 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertEqual(state3.reason, "default_personality")
 
     def test_emotion_meta_question_does_not_invent_anger(self):
-        state = select_emotion_with_memory(
-            "Are you not angry?",
-            EmotionMemory(),
-            turn_id=1,
-            now=10.0,
-        )
+        for text in ("Are you not angry?", "Do not angry.", "you're not angry"):
+            with self.subTest(text=text):
+                state = select_emotion_with_memory(
+                    text,
+                    EmotionMemory(),
+                    turn_id=1,
+                    now=10.0,
+                )
 
-        self.assertEqual(state.emotion, "deadpan")
-        self.assertEqual(state.reason, "default_personality")
+                self.assertEqual(state.emotion, "deadpan")
+                self.assertEqual(state.reason, "default_personality")
 
     def test_emotion_memory_does_not_contaminate_technical_questions(self):
         memory = EmotionMemory()
