@@ -51,6 +51,12 @@ from src.realtime.realtime_config import (
     CASE_EMOTION_LLM_PROVIDER,
     CASE_EMOTION_LLM_TIMEOUT_SEC,
     CASE_EMOTION_LLM_MIN_CONFIDENCE,
+    CASE_EMOTION_MEMORY_ENABLED,
+    CASE_EMOTION_MEMORY_TTL_TURNS,
+    CASE_EMOTION_MEMORY_TTL_SEC,
+    CASE_EMOTION_MEMORY_MIN_CONFIDENCE,
+    CASE_EMOTION_MEMORY_DECAY,
+    CASE_EMOTION_META_QUESTIONS_ENABLED,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
     CASE_TTS_ENABLE_THINKING_FALLBACK,
@@ -80,12 +86,13 @@ from src.realtime.realtime_config import (
 from src.realtime.realtime_persona import build_case_system_instruction
 from src.realtime.response_chunker import ResponseChunker as StreamingResponseChunker
 from src.persona.emotion import (
+    EmotionMemory,
     EmotionState,
     build_emotion_user_message,
     classify_emotion_with_llm,
     default_emotion_state,
-    detect_emotion,
     parse_leading_emotion_tag,
+    select_emotion_with_memory,
 )
 from src.voice_pipeline.tts_safe_text import safe_tts_text
 
@@ -367,6 +374,8 @@ class CASEPersonality:
 
         self.message_bus = message_bus
         self._turn_numbers = count(1)
+        self._emotion_turn_numbers = count(1)
+        self._emotion_memory = EmotionMemory()
         self._turn_lock = asyncio.Lock()
         self._thinking_ack_done = asyncio.Event()
         self._thinking_filler_tasks: dict[int, asyncio.Task] = {}
@@ -457,13 +466,33 @@ class CASEPersonality:
 
     async def _select_emotion(self, user_text: str) -> EmotionState:
         if CASE_TTS_EMOTION_ENABLED:
-            state = detect_emotion(user_text)
+            if not hasattr(self, "_emotion_turn_numbers"):
+                self._emotion_turn_numbers = count(1)
+            if not hasattr(self, "_emotion_memory"):
+                self._emotion_memory = EmotionMemory()
+            emotion_turn_id = next(self._emotion_turn_numbers)
+            state = select_emotion_with_memory(
+                user_text,
+                self._emotion_memory,
+                turn_id=emotion_turn_id,
+                memory_enabled=CASE_EMOTION_MEMORY_ENABLED,
+                ttl_turns=CASE_EMOTION_MEMORY_TTL_TURNS,
+                ttl_sec=CASE_EMOTION_MEMORY_TTL_SEC,
+                min_confidence=CASE_EMOTION_MEMORY_MIN_CONFIDENCE,
+                decay=CASE_EMOTION_MEMORY_DECAY,
+                meta_questions_enabled=CASE_EMOTION_META_QUESTIONS_ENABLED,
+            )
             if (
                 CASE_EMOTION_LLM_FALLBACK
                 and state.confidence < CASE_EMOTION_LLM_MIN_CONFIDENCE
             ):
                 llm_state = await self._classify_emotion_with_llm(user_text)
                 if llm_state is not None:
+                    self._emotion_memory.update_from_state(
+                        llm_state,
+                        turn_id=emotion_turn_id,
+                        min_confidence=CASE_EMOTION_MEMORY_MIN_CONFIDENCE,
+                    )
                     self._log_emotion_state(llm_state)
                     return llm_state
             self._log_emotion_state(state)

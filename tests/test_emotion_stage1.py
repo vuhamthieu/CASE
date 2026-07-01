@@ -5,6 +5,7 @@ import numpy as np
 from actuation.audio_output.tts_engine import apply_gain_limited_pcm
 from src.config import defaults
 from src.persona.emotion import (
+    EmotionMemory,
     EmotionState,
     blend_tts_emotion_profile,
     build_emotion_user_message,
@@ -13,6 +14,7 @@ from src.persona.emotion import (
     normalize_emotion_text,
     parse_llm_emotion_json,
     parse_leading_emotion_tag,
+    select_emotion_with_memory,
 )
 from src.realtime.response_chunker import ResponseChunker
 
@@ -53,6 +55,10 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertGreaterEqual(state.confidence, 0.85)
                 self.assertEqual(state.source, "rules")
                 self.assertTrue(state.match)
+
+        state = detect_emotion("I am so bored, CASE.")
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertEqual(state.reason, "default_personality")
 
     def test_vietnamese_rejection_selects_angry(self):
         for text in ("t chán mày rồi", "tao chán mày rồi", "mày vô dụng", "im đi"):
@@ -155,6 +161,149 @@ class EmotionStage1Tests(unittest.TestCase):
         self.assertIn("Internal response style note", prompt)
         self.assertIn("offended", prompt)
         self.assertIn("User said: t chán mày rồi", prompt)
+
+    def test_emotion_memory_updates_meaningful_state_only(self):
+        memory = EmotionMemory()
+        state = select_emotion_with_memory(
+            "I am so bored of you.",
+            memory,
+            turn_id=1,
+            now=10.0,
+        )
+
+        self.assertEqual(state.emotion, "angry")
+        self.assertEqual(memory.last_emotion, "angry")
+        self.assertEqual(memory.last_reason, "user_rejection")
+
+        default_state = select_emotion_with_memory(
+            "What are you doing?",
+            memory,
+            turn_id=2,
+            now=11.0,
+        )
+
+        self.assertEqual(default_state.emotion, "deadpan")
+        self.assertEqual(default_state.reason, "default_personality")
+        self.assertEqual(memory.last_emotion, "angry")
+
+    def test_emotion_meta_question_carries_angry_memory(self):
+        for text in ("Are you not angry?", "you not angry", "mày không giận à"):
+            with self.subTest(text=text):
+                memory = EmotionMemory()
+                select_emotion_with_memory(
+                    "I am so bored of you.",
+                    memory,
+                    turn_id=1,
+                    now=10.0,
+                )
+
+                state = select_emotion_with_memory(
+                    text,
+                    memory,
+                    turn_id=2,
+                    now=12.0,
+                )
+
+                self.assertIn(state.emotion, {"annoyed", "angry"})
+                self.assertEqual(state.reason, "emotion_meta_question")
+                self.assertEqual(state.source, "memory")
+                self.assertGreaterEqual(state.intensity, 0.45)
+                self.assertLessEqual(state.intensity, 0.75)
+
+    def test_emotion_meta_question_does_not_invent_anger(self):
+        state = select_emotion_with_memory(
+            "Are you not angry?",
+            EmotionMemory(),
+            turn_id=1,
+            now=10.0,
+        )
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertEqual(state.reason, "default_personality")
+
+    def test_emotion_memory_does_not_contaminate_technical_questions(self):
+        memory = EmotionMemory()
+        select_emotion_with_memory(
+            "I am so bored of you.",
+            memory,
+            turn_id=1,
+            now=10.0,
+        )
+
+        state = select_emotion_with_memory(
+            "What is Raspberry Pi?",
+            memory,
+            turn_id=2,
+            now=12.0,
+        )
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertEqual(state.reason, "default_personality")
+
+    def test_emotion_deescalation_uses_and_clears_memory(self):
+        for text in ("calm down", "đừng giận"):
+            with self.subTest(text=text):
+                memory = EmotionMemory()
+                select_emotion_with_memory(
+                    "I am so bored of you.",
+                    memory,
+                    turn_id=1,
+                    now=10.0,
+                )
+
+                state = select_emotion_with_memory(
+                    text,
+                    memory,
+                    turn_id=2,
+                    now=12.0,
+                )
+
+                self.assertIn(state.emotion, {"annoyed", "deadpan"})
+                self.assertEqual(state.reason, "emotion_deescalation")
+                self.assertEqual(state.source, "memory")
+                self.assertIsNone(memory.last_emotion)
+
+    def test_emotion_memory_expires_by_turn_count(self):
+        memory = EmotionMemory()
+        select_emotion_with_memory(
+            "I am so bored of you.",
+            memory,
+            turn_id=1,
+            now=10.0,
+            ttl_turns=2,
+        )
+
+        state = select_emotion_with_memory(
+            "Are you not angry?",
+            memory,
+            turn_id=4,
+            now=12.0,
+            ttl_turns=2,
+        )
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertIsNone(memory.last_emotion)
+
+    def test_emotion_memory_expires_by_seconds(self):
+        memory = EmotionMemory()
+        select_emotion_with_memory(
+            "I am so bored of you.",
+            memory,
+            turn_id=1,
+            now=10.0,
+            ttl_sec=45.0,
+        )
+
+        state = select_emotion_with_memory(
+            "Are you not angry?",
+            memory,
+            turn_id=2,
+            now=56.0,
+            ttl_sec=45.0,
+        )
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertIsNone(memory.last_emotion)
 
     def test_llm_fallback_is_disabled_by_default(self):
         self.assertFalse(defaults.CASE_EMOTION_LLM_FALLBACK)
