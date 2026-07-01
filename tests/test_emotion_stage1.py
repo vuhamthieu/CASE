@@ -7,6 +7,7 @@ from src.config import defaults
 from src.persona.emotion import (
     EmotionMemory,
     EmotionState,
+    analyze_utterance_signals,
     blend_tts_emotion_profile,
     build_emotion_user_message,
     classify_emotion_with_llm,
@@ -74,7 +75,9 @@ class EmotionStage1Tests(unittest.TestCase):
             ("can you get angry for a moment", "angry"),
             ("angry or moment", "angry"),
             ("speak angrily", "angry"),
+            ("Speak sarcastic.", "sarcastic"),
             ("nói kiểu tức giận", "angry"),
+            ("nói giận lên", "angry"),
             ("nói buồn hơn", "sad"),
         ):
             with self.subTest(text=text):
@@ -82,39 +85,43 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertEqual(state.emotion, emotion)
                 self.assertEqual(state.reason, "requested_emotion_style")
                 self.assertEqual(state.source, "rules")
-                if "angry" in text or "moment" in text:
-                    self.assertIn(
-                        state.match,
-                        {"request_angry_style_fuzzy", "english_angry_style", "english_angry_speak"},
-                    )
+                self.assertEqual(state.match, "requested_emotion_style")
 
         state = detect_emotion("Can you be angry and tell me a joke?")
         self.assertEqual(state.emotion, "angry")
         self.assertEqual(state.reason, "requested_emotion_style")
 
+    def test_deescalation_is_not_requested_emotion_style(self):
+        state = detect_emotion("Do not be angry.")
+
+        self.assertEqual(state.emotion, "deadpan")
+        self.assertEqual(state.reason, "default_personality")
+
     def test_praise_selects_amused(self):
-        cases = {
-            "good job": "short_praise",
-            "nice": "short_praise",
-            "you are funny": "you_are_praise",
-            "I am so proud of you.": "proud_of_you",
-            "proud of you": "proud_of_you",
-            "good job CASE": "good_job_case",
-            "you did good": "you_did_well",
-            "you did well": "you_did_well",
-            "nice work": "nice_work",
-            "mày giỏi đấy": "vietnamese_praise",
-            "hay đấy": "vietnamese_praise",
-            "mày làm tốt đấy": "vietnamese_proud_praise",
-            "tự hào về mày": "vietnamese_proud_praise",
-            "tự hào về bạn": "vietnamese_proud_praise",
-        }
-        for text, match in cases.items():
+        cases = (
+            "good job",
+            "nice",
+            "you are funny",
+            "I am so proud of you.",
+            "I'm proud of you.",
+            "I am so proud of you.",
+            "proud of you",
+            "good job CASE",
+            "you did good",
+            "you did well",
+            "nice work",
+            "mày giỏi đấy",
+            "hay đấy",
+            "mày làm tốt đấy",
+            "tự hào về mày",
+            "tự hào về bạn",
+        )
+        for text in cases:
             with self.subTest(text=text):
                 state = detect_emotion(text)
                 self.assertEqual(state.emotion, "amused")
                 self.assertEqual(state.reason, "user_praise")
-                self.assertEqual(state.match, match)
+                self.assertEqual(state.match, "targeted_positive_sentiment")
 
     def test_sadness_selects_sad(self):
         for text in ("I'm sad", "I'm tired", "I feel bad", "hôm nay tao buồn"):
@@ -122,6 +129,53 @@ class EmotionStage1Tests(unittest.TestCase):
                 state = detect_emotion(text)
                 self.assertEqual(state.emotion, "sad")
                 self.assertEqual(state.reason, "user_sadness")
+                self.assertEqual(state.match, "self_sadness")
+
+    def test_generalized_targeted_negative_sentiment(self):
+        for text in (
+            "You are boring.",
+            "You are so boring.",
+            "You're very boring.",
+            "CASE, you are useless.",
+            "CASE is useless.",
+            "You are annoying.",
+            "I am bored of you.",
+            "I am tired of you.",
+            "I hate you.",
+            "Mày chán quá.",
+            "Bạn nhạt quá.",
+        ):
+            with self.subTest(text=text):
+                state = detect_emotion(text)
+                self.assertEqual(state.emotion, "angry")
+                self.assertEqual(state.reason, "user_rejection")
+                self.assertEqual(state.match, "targeted_negative_sentiment")
+
+    def test_generic_negative_sentiment_does_not_target_case(self):
+        for text in (
+            "I am bored.",
+            "Yea I'm so bored.",
+            "I am so bored today.",
+            "This movie is boring.",
+            "That joke is bad.",
+            "The task is annoying.",
+            "The code is broken.",
+        ):
+            with self.subTest(text=text):
+                state = detect_emotion(text)
+                self.assertEqual(state.emotion, "deadpan")
+                self.assertEqual(state.reason, "default_personality")
+
+    def test_utterance_signals_expose_targets_and_scores(self):
+        targeted = analyze_utterance_signals("CASE, you are useless.")
+        generic = analyze_utterance_signals("This movie is boring.")
+
+        self.assertTrue(targeted.targets_case)
+        self.assertGreaterEqual(targeted.target_negative_score, 0.80)
+        self.assertFalse(generic.targets_case)
+        self.assertTrue(generic.targets_other_object)
+        self.assertEqual(generic.target_negative_score, 0.0)
+        self.assertGreater(generic.generic_negative_score, 0.0)
 
     def test_neutral_defaults_to_deadpan(self):
         state = detect_emotion("what are you doing")

@@ -70,6 +70,28 @@ class TtsEmotionProfile:
     gain_db: float = 0.0
 
 
+@dataclass(frozen=True)
+class UtteranceSignals:
+    original_text: str
+    normalized: str
+    tokens: list[str]
+    targets_case: bool
+    targets_user_self: bool
+    targets_other_object: bool
+    is_question: bool
+    is_command: bool
+    is_deescalation: bool
+    is_meta_emotion_question: bool
+    requested_emotion: str | None
+    negative_terms: list[str]
+    positive_terms: list[str]
+    rejection_terms: list[str]
+    praise_terms: list[str]
+    target_negative_score: float
+    target_positive_score: float
+    generic_negative_score: float
+
+
 @dataclass
 class EmotionMemory:
     last_emotion: str | None = None
@@ -172,16 +194,135 @@ def clamp_intensity(value: float) -> float:
     return clamp_unit(value, default=0.35)
 
 
+NEGATIVE_TERMS = {
+    "boring",
+    "bored",
+    "useless",
+    "stupid",
+    "dumb",
+    "annoying",
+    "bad",
+    "terrible",
+    "awful",
+    "lame",
+    "cringe",
+    "slow",
+    "broken",
+    "trash",
+    "garbage",
+    "mid",
+    "pathetic",
+    "chán",
+    "nhạt",
+    "vô dụng",
+    "ngu",
+    "dở",
+    "tệ",
+    "phiền",
+    "rác",
+    "xàm",
+    "phế",
+}
+POSITIVE_TERMS = {
+    "good",
+    "great",
+    "nice",
+    "amazing",
+    "smart",
+    "useful",
+    "helpful",
+    "impressive",
+    "well",
+    "proud",
+    "funny",
+    "tốt",
+    "giỏi",
+    "hay",
+    "đỉnh",
+    "xịn",
+    "hữu ích",
+    "tự hào",
+}
+REJECTION_TERMS = {
+    "hate",
+    "dislike",
+    "do not like",
+    "bored of",
+    "tired of",
+    "sick of",
+    "done with",
+    "annoyed by",
+    "shut up",
+    "stop talking",
+    "nobody asked",
+    "im đi",
+    "câm đi",
+    "ghét",
+    "không thích",
+    "chán",
+    "mệt với",
+}
+PRAISE_TERMS = {
+    "good job",
+    "nice work",
+    "well done",
+    "did well",
+    "did good",
+    "proud of",
+    "làm tốt",
+    "tự hào",
+}
+CASE_TARGET_TERMS = {"you", "your", "case", "robot", "bot", "mày", "bạn", "cậu", "m"}
+SELF_TARGET_TERMS = {"i", "me", "my", "mình", "tao", "tớ", "tui"}
+OBJECT_TERMS = {"movie", "joke", "task", "weather", "code", "board"}
+OBJECT_DETERMINERS = {"this", "that", "the"}
+EMOTION_REQUEST_TERMS = {
+    "angry": "angry",
+    "mad": "angry",
+    "giận": "angry",
+    "gắt": "angry",
+    "tức giận": "angry",
+    "sarcastic": "sarcastic",
+    "sad": "sad",
+    "buồn": "sad",
+    "happy": "excited",
+    "excited": "excited",
+    "annoyed": "annoyed",
+    "angrily": "angry",
+    "louder": "excited",
+    "to hơn": "excited",
+}
+HUMOR_TERMS = {"joke", "funny", "roast", "laugh", "khịa", "chuyện cười"}
+COMMAND_TERMS = {"speak", "act", "sound", "talk", "say", "nói", "be", "get"}
+SELF_SADNESS_TERMS = {"sad", "tired", "stressed", "buồn", "mệt"}
+SHORT_PRAISE_UTTERANCES = {"nice", "good job", "well done", "nice work", "hay đấy", "tốt đấy"}
+DISMISSIVE_REJECTION_UTTERANCES = {"shut up", "stop talking", "nobody asked you", "im đi", "i am đi", "câm đi"}
+
 _CONTRACTIONS = (
     (r"\bi'm\b", "i am"),
     (r"\bim\b", "i am"),
+    (r"\bi've\b", "i have"),
+    (r"\bive\b", "i have"),
     (r"\byou're\b", "you are"),
     (r"\byoure\b", "you are"),
     (r"\bdon't\b", "do not"),
-    (r"\bcant\b", "can not"),
-    (r"\bcan't\b", "can not"),
+    (r"\bdont\b", "do not"),
+    (r"\bcan't\b", "cannot"),
+    (r"\bcant\b", "cannot"),
 )
-_START_FILLERS = {"yeah", "uh", "um", "like", "so"}
+_START_FILLERS = (
+    ("sorry", "i", "mean"),
+    ("i", "mean"),
+    ("ý", "là"),
+    ("actually",),
+    ("like",),
+    ("yea",),
+    ("yeah",),
+    ("uh",),
+    ("um",),
+    ("so",),
+    ("à",),
+)
 
 
 def normalize_emotion_text(text: str, *, strip_start_fillers: bool = True) -> str:
@@ -192,11 +333,229 @@ def normalize_emotion_text(text: str, *, strip_start_fillers: bool = True) -> st
     normalized = re.sub(r"[^\w\s]+", " ", normalized, flags=re.UNICODE)
     words = normalized.split()
     if strip_start_fillers:
-        while words and words[0] in _START_FILLERS:
-            words.pop(0)
+        changed = True
+        while changed and words:
+            changed = False
+            for filler in _START_FILLERS:
+                if tuple(words[: len(filler)]) == filler:
+                    del words[: len(filler)]
+                    changed = True
+                    break
     normalized = " ".join(words)
     logger.debug("EMOTION_NORMALIZED: raw=%r normalized=%r", raw, normalized)
     return normalized
+
+
+def _contains_phrase(normalized: str, phrase: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(phrase)}\b", normalized))
+
+
+def _find_terms(normalized: str, tokens: list[str], terms: set[str]) -> list[str]:
+    found: list[str] = []
+    token_set = set(tokens)
+    for term in sorted(terms):
+        if " " in term:
+            if _contains_phrase(normalized, term):
+                found.append(term)
+        elif term in token_set:
+            found.append(term)
+    return found
+
+
+def _has_any_phrase(normalized: str, phrases: tuple[str, ...]) -> bool:
+    return any(_contains_phrase(normalized, phrase) for phrase in phrases)
+
+
+def _term_indexes(tokens: list[str], terms: set[str]) -> list[int]:
+    return [index for index, token in enumerate(tokens) if token in terms]
+
+
+def _has_proximity(tokens: list[str], left_terms: set[str], right_terms: set[str], *, window: int = 4) -> bool:
+    left = _term_indexes(tokens, left_terms)
+    right = _term_indexes(tokens, right_terms)
+    return any(abs(a - b) <= window for a in left for b in right)
+
+
+def _has_direct_case_target(tokens: list[str]) -> bool:
+    return any(token in {"you", "your", "mày", "bạn", "cậu", "m"} for token in tokens)
+
+
+def _case_named_before_sentiment(tokens: list[str], sentiment_terms: set[str]) -> bool:
+    case_indexes = _term_indexes(tokens, {"case", "robot", "bot"})
+    sentiment_indexes = _term_indexes(tokens, sentiment_terms)
+    return any(case_index < sentiment_index for case_index in case_indexes for sentiment_index in sentiment_indexes)
+
+
+def _targets_case(normalized: str, tokens: list[str]) -> bool:
+    if _has_direct_case_target(tokens):
+        return True
+    if _contains_phrase(normalized, "hey case"):
+        return True
+    return any(token in {"case", "robot", "bot"} for token in tokens)
+
+
+def _targets_other_object(tokens: list[str]) -> bool:
+    if any(token in OBJECT_TERMS for token in tokens):
+        return True
+    return bool(tokens and tokens[0] in OBJECT_DETERMINERS)
+
+
+def _has_case_rejection_relation(normalized: str, tokens: list[str]) -> bool:
+    relation_phrases = (
+        "bored of you",
+        "tired of you",
+        "sick of you",
+        "done with you",
+        "annoyed by you",
+        "bored of case",
+        "tired of case",
+        "sick of case",
+        "hate you",
+        "dislike you",
+        "do not like you",
+        "hate case",
+        "dislike case",
+        "ghét mày",
+        "ghét bạn",
+        "không thích mày",
+        "không thích bạn",
+        "chán mày",
+        "chán bạn",
+        "mệt với mày",
+        "mệt với bạn",
+    )
+    if _has_any_phrase(normalized, relation_phrases):
+        return True
+    if _has_proximity(tokens, {"ghét", "chán", "mệt"}, {"mày", "bạn", "cậu", "m"}, window=4):
+        return True
+    return False
+
+
+def _is_dismissive_rejection(normalized: str) -> bool:
+    return any(_contains_phrase(normalized, phrase) for phrase in DISMISSIVE_REJECTION_UTTERANCES)
+
+
+def _is_self_sadness(signals: UtteranceSignals) -> bool:
+    if signals.target_negative_score > 0.0:
+        return False
+    if "feel bad" in signals.normalized:
+        return True
+    return signals.targets_user_self and any(term in signals.tokens for term in SELF_SADNESS_TERMS)
+
+
+def _has_case_negative_construction(normalized: str, tokens: list[str], negative_terms: list[str], rejection_terms: list[str]) -> bool:
+    if rejection_terms and _has_case_rejection_relation(normalized, tokens):
+        return True
+    negative_set = set(negative_terms)
+    if not negative_set:
+        return False
+    if _has_direct_case_target(tokens) and any(" " in term and _contains_phrase(normalized, term) for term in negative_terms):
+        return True
+    if _has_direct_case_target(tokens) and _has_proximity(tokens, CASE_TARGET_TERMS, negative_set, window=5):
+        return True
+    if _case_named_before_sentiment(tokens, negative_set):
+        return True
+    return False
+
+
+def _has_case_positive_construction(normalized: str, tokens: list[str], positive_terms: list[str], praise_terms: list[str]) -> bool:
+    positive_set = set(positive_terms) | set(praise_terms)
+    if not positive_set:
+        return False
+    if _has_direct_case_target(tokens) and any(
+        " " in term and _contains_phrase(normalized, term)
+        for term in list(positive_terms) + list(praise_terms)
+    ):
+        return True
+    if _has_direct_case_target(tokens) and _has_proximity(tokens, CASE_TARGET_TERMS, positive_set, window=5):
+        return True
+    if _case_named_before_sentiment(tokens, positive_set):
+        return True
+    if _has_any_phrase(normalized, ("good job case", "proud of you", "tự hào về mày", "tự hào về bạn")):
+        return True
+    if normalized in SHORT_PRAISE_UTTERANCES:
+        return True
+    return False
+
+
+def _detect_requested_emotion(normalized: str, tokens: list[str]) -> str | None:
+    if _detect_deescalation(normalized):
+        return None
+    requested = None
+    for term, emotion in EMOTION_REQUEST_TERMS.items():
+        if _contains_phrase(normalized, term):
+            requested = emotion
+            break
+    if requested is None:
+        return None
+    if any(token in COMMAND_TERMS for token in tokens):
+        return requested
+    if _has_any_phrase(normalized, ("can you", "for a moment", "or moment", "like you are")):
+        return requested
+    return None
+
+
+def _is_humor_request(normalized: str, tokens: list[str]) -> bool:
+    if "roast" in tokens or "khịa" in tokens:
+        return True
+    if "joke" in tokens and any(token in {"tell", "make", "say"} for token in tokens):
+        return True
+    return _has_any_phrase(
+        normalized,
+        ("tell me a joke", "make me laugh", "say something funny", "make fun of me", "kể chuyện cười"),
+    )
+
+
+def analyze_utterance_signals(text: str) -> UtteranceSignals:
+    normalized = normalize_emotion_text(text)
+    tokens = normalized.split()
+    negative_terms = _find_terms(normalized, tokens, NEGATIVE_TERMS)
+    positive_terms = _find_terms(normalized, tokens, POSITIVE_TERMS)
+    rejection_terms = _find_terms(normalized, tokens, REJECTION_TERMS)
+    praise_terms = _find_terms(normalized, tokens, PRAISE_TERMS)
+    targets_case = _targets_case(normalized, tokens)
+    targets_user_self = any(token in SELF_TARGET_TERMS for token in tokens)
+    targets_other_object = _targets_other_object(tokens) and not targets_case
+    target_negative = 0.0
+    if targets_case and _has_case_negative_construction(normalized, tokens, negative_terms, rejection_terms):
+        target_negative = 0.90 if rejection_terms else 0.86
+    target_positive = 0.0
+    if (targets_case or normalized in SHORT_PRAISE_UTTERANCES) and _has_case_positive_construction(normalized, tokens, positive_terms, praise_terms):
+        target_positive = 0.82 if praise_terms else 0.78
+    generic_negative = 0.55 if negative_terms else 0.0
+    signals = UtteranceSignals(
+        original_text=str(text or ""),
+        normalized=normalized,
+        tokens=tokens,
+        targets_case=targets_case,
+        targets_user_self=targets_user_self,
+        targets_other_object=targets_other_object,
+        is_question="?" in str(text or "") or bool(tokens and tokens[0] in {"what", "why", "how", "are", "do", "did", "can", "could", "would", "is"}),
+        is_command=any(token in COMMAND_TERMS for token in tokens),
+        is_deescalation=_detect_deescalation(normalized) is not None,
+        is_meta_emotion_question=_detect_emotion_meta_question(normalized) is not None,
+        requested_emotion=_detect_requested_emotion(normalized, tokens),
+        negative_terms=negative_terms,
+        positive_terms=positive_terms,
+        rejection_terms=rejection_terms,
+        praise_terms=praise_terms,
+        target_negative_score=target_negative,
+        target_positive_score=target_positive,
+        generic_negative_score=generic_negative,
+    )
+    logger.debug(
+        "EMOTION_SIGNALS: targets_case=%s self_target=%s negative=%s positive=%s "
+        "rejection=%s requested=%s meta=%s deescalation=%s",
+        signals.targets_case,
+        signals.targets_user_self,
+        signals.negative_terms,
+        signals.positive_terms,
+        signals.rejection_terms,
+        signals.requested_emotion,
+        signals.is_meta_emotion_question,
+        signals.is_deescalation,
+    )
+    return signals
 
 
 def _state(
@@ -237,115 +596,94 @@ def default_emotion_state(
     )
 
 
-def _requested_style(cleaned: str) -> EmotionState | None:
-    if re.search(r"\b(?:do not|don t|dont)\s+be\s+angry\b", cleaned):
-        return None
-    if re.search(
-        r"\b(?:can you\s+)?(?:get|be)\s+angry\s+(?:for|or)\s+(?:a\s+)?moment\b",
-        cleaned,
-    ):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
-    if re.search(r"\b(?:can you\s+)?get\s+angry\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
-    if re.search(r"\bangry\s+(?:for|or)\s+(?:a\s+)?moment\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
-    if re.search(r"\b(?:be|act|sound)\s+(?:so\s+|really\s+)?angry\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.82, match="english_angry_style")
-    if re.search(r"\bspeak\s+(?:angrily|angry|louder)\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.80, match="english_angry_speak")
-    if re.search(r"\bsay it\s+angry\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.80, match="english_angry_say_it")
-    if re.search(r"\bsound\s+excited\b", cleaned):
-        return _state("excited", 0.68, "requested_emotion_style", confidence=0.78, match="english_excited_style")
-    if re.search(r"\bsound\s+sad\b", cleaned):
-        return _state("sad", 0.65, "requested_emotion_style", confidence=0.78, match="english_sad_style")
-    if re.search(r"\bnói\s+(?:giận|kiểu tức giận|gắt)(?:\s+lên)?\b", cleaned):
-        return _state("angry", 0.70, "requested_emotion_style", confidence=0.82, match="vietnamese_angry_style")
-    if re.search(r"\bnói\s+buồn\s+hơn\b", cleaned):
-        return _state("sad", 0.65, "requested_emotion_style", confidence=0.80, match="vietnamese_sad_style")
-    if re.search(r"\bnói\s+vui\s+hơn\b", cleaned):
-        return _state("excited", 0.65, "requested_emotion_style", confidence=0.76, match="vietnamese_excited_style")
-    if re.search(r"\bnói\s+to\s+hơn\b", cleaned):
-        return _state("excited", 0.62, "requested_emotion_style", confidence=0.75, match="vietnamese_louder_style")
-    return None
+def _route_from_signals(signals: UtteranceSignals) -> EmotionState:
+    if signals.requested_emotion:
+        emotion = signals.requested_emotion
+        intensity = 0.70 if emotion == "angry" else 0.65
+        logger.debug(
+            "EMOTION_SCORE: candidate=%s reason=requested_emotion_style score=0.80 match=requested_emotion_style",
+            emotion,
+        )
+        return _state(
+            emotion,
+            intensity,
+            "requested_emotion_style",
+            confidence=0.80,
+            match="requested_emotion_style",
+        )
 
+    if _is_dismissive_rejection(signals.normalized):
+        logger.debug(
+            "EMOTION_SCORE: candidate=angry reason=user_rejection score=0.88 match=dismissive_command"
+        )
+        return _state(
+            "angry",
+            0.82,
+            "user_rejection",
+            confidence=0.88,
+            match="dismissive_command",
+        )
 
-def _user_rejection(cleaned: str) -> EmotionState | None:
-    if re.search(r"\b(?:bored|tired|sick)\s+(?:of|with)\s+(?:you|case)\b", cleaned):
-        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="bored_of_you")
-    if re.search(r"\b(?:i am\s+)?(?:really\s+|so\s+)?(?:bored|tired|sick)\s+(?:of|with)\s+(?:you|case)\b", cleaned):
-        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="bored_of_you")
-    if re.search(r"\b(?:hate|dislike)\s+(?:you|case)\b", cleaned):
-        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="hate_you")
-    if re.search(r"\b(?:you|case)\s+(?:are\s+)?(?:boring|useless|stupid|dumb|annoying)\b", cleaned):
-        return _state("angry", 0.85, "user_rejection", confidence=0.90, match="you_are_insult")
-    if re.search(r"\b(?:shut up|stop talking|nobody asked you)\b", cleaned):
-        return _state("angry", 0.82, "user_rejection", confidence=0.88, match="dismissive_command")
-    if re.search(r"\b(?:chán|ghét|bực|khó chịu)\b.*\b(?:mày|bạn|case|cậu)\b", cleaned):
-        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="vietnamese_rejection")
-    if re.search(r"\b(?:mày|bạn|case|cậu)\b.*\b(?:chán|vô dụng|ngu|phiền)\b", cleaned):
-        return _state("angry", 0.86, "user_rejection", confidence=0.90, match="vietnamese_you_insult")
-    if re.search(r"\b(?:im đi|i am đi|câm đi)\b", cleaned):
-        return _state("angry", 0.82, "user_rejection", confidence=0.88, match="vietnamese_shut_up")
-    return None
+    if signals.target_negative_score >= 0.80:
+        logger.debug(
+            "EMOTION_SCORE: candidate=angry reason=user_rejection score=%.2f match=targeted_negative_sentiment",
+            signals.target_negative_score,
+        )
+        return _state(
+            "angry",
+            0.85,
+            "user_rejection",
+            confidence=signals.target_negative_score,
+            match="targeted_negative_sentiment",
+        )
 
+    if _is_self_sadness(signals):
+        logger.debug(
+            "EMOTION_SCORE: candidate=sad reason=user_sadness score=0.82 match=self_sadness"
+        )
+        return _state(
+            "sad",
+            0.65,
+            "user_sadness",
+            confidence=0.82,
+            match="self_sadness",
+        )
 
-def _user_sadness(cleaned: str) -> EmotionState | None:
-    if re.search(r"\bi am\s+(?:sad|tired|stressed)\b", cleaned):
-        return _state("sad", 0.65, "user_sadness", confidence=0.82, match="english_user_feeling")
-    if re.search(r"\bi feel bad\b", cleaned):
-        return _state("sad", 0.65, "user_sadness", confidence=0.82, match="english_feel_bad")
-    if re.search(r"\b(?:hôm nay tao buồn|mình buồn quá|tao mệt|mình mệt quá)\b", cleaned):
-        return _state("sad", 0.68, "user_sadness", confidence=0.82, match="vietnamese_sadness")
-    return None
+    if signals.target_positive_score >= 0.70:
+        logger.debug(
+            "EMOTION_SCORE: candidate=amused reason=user_praise score=%.2f match=targeted_positive_sentiment",
+            signals.target_positive_score,
+        )
+        return _state(
+            "amused",
+            0.65,
+            "user_praise",
+            confidence=signals.target_positive_score,
+            match="targeted_positive_sentiment",
+        )
 
+    if _is_humor_request(signals.normalized, signals.tokens):
+        logger.debug(
+            "EMOTION_SCORE: candidate=sarcastic reason=humor_request score=0.82 match=humor_request"
+        )
+        return _state(
+            "sarcastic",
+            0.65,
+            "humor_request",
+            confidence=0.82,
+            match="humor_request",
+        )
 
-def _user_praise(cleaned: str) -> EmotionState | None:
-    if re.search(r"\b(?:i am\s+(?:so\s+)?)?proud\s+of\s+you\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="proud_of_you")
-    if re.search(r"\bgood job\s+case\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="good_job_case")
-    if re.search(r"\byou did\s+(?:good|well)\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="you_did_well")
-    if re.search(r"\bnice work\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="nice_work")
-    if re.search(r"\b(?:good job|nice|well done)\b", cleaned):
-        return _state("amused", 0.62, "user_praise", confidence=0.80, match="short_praise")
-    if re.search(r"\byou are\s+(?:funny|smart)\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.82, match="you_are_praise")
-    if re.search(r"\b(?:mày làm tốt đấy|tự hào về mày|tự hào về bạn)\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="vietnamese_proud_praise")
-    if re.search(r"\b(?:mày giỏi|hay đấy|tốt đấy)\b", cleaned):
-        return _state("amused", 0.65, "user_praise", confidence=0.80, match="vietnamese_praise")
-    return None
-
-
-def _humor_request(cleaned: str) -> EmotionState | None:
-    if re.search(r"\b(?:tell me a joke|roast me|say something funny|make fun of me)\b", cleaned):
-        return _state("sarcastic", 0.65, "humor_request", confidence=0.82, match="english_humor_request")
-    if re.search(r"\b(?:kể chuyện cười|khịa tao đi)\b", cleaned):
-        return _state("sarcastic", 0.65, "humor_request", confidence=0.80, match="vietnamese_humor_request")
-    return None
-
-
-_RULES = (
-    _requested_style,
-    _user_rejection,
-    _user_sadness,
-    _user_praise,
-    _humor_request,
-)
+    if signals.generic_negative_score > 0.0:
+        logger.debug("EMOTION_SCORE_SKIP: reason=negative_not_targeted")
+    return default_emotion_state()
 
 
 def detect_emotion(text: str) -> EmotionState:
-    cleaned = normalize_emotion_text(text)
-    if not cleaned:
+    signals = analyze_utterance_signals(text)
+    if not signals.normalized:
         return default_emotion_state()
-    for detector in _RULES:
-        state = detector(cleaned)
-        if state is not None:
-            return state
-    return default_emotion_state()
+    return _route_from_signals(signals)
 
 
 def _detect_deescalation(cleaned: str) -> str | None:
