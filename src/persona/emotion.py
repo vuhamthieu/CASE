@@ -32,6 +32,7 @@ VALID_REASONS = {
     "humor_request",
     "emotion_meta_question",
     "emotion_deescalation",
+    "sarcastic_followup",
     "ambiguous",
 }
 
@@ -237,6 +238,15 @@ def default_emotion_state(
 
 
 def _requested_style(cleaned: str) -> EmotionState | None:
+    if re.search(
+        r"\b(?:can you\s+)?(?:get|be)\s+angry\s+(?:for|or)\s+(?:a\s+)?moment\b",
+        cleaned,
+    ):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
+    if re.search(r"\b(?:can you\s+)?get\s+angry\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
+    if re.search(r"\bangry\s+(?:for|or)\s+(?:a\s+)?moment\b", cleaned):
+        return _state("angry", 0.70, "requested_emotion_style", confidence=0.78, match="request_angry_style_fuzzy")
     if re.search(r"\b(?:be|act|sound)\s+(?:so\s+|really\s+)?angry\b", cleaned):
         return _state("angry", 0.70, "requested_emotion_style", confidence=0.82, match="english_angry_style")
     if re.search(r"\bspeak\s+(?:angrily|angry|louder)\b", cleaned):
@@ -289,10 +299,20 @@ def _user_sadness(cleaned: str) -> EmotionState | None:
 
 
 def _user_praise(cleaned: str) -> EmotionState | None:
+    if re.search(r"\b(?:i am\s+(?:so\s+)?)?proud\s+of\s+you\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="proud_of_you")
+    if re.search(r"\bgood job\s+case\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="good_job_case")
+    if re.search(r"\byou did\s+(?:good|well)\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="you_did_well")
+    if re.search(r"\bnice work\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="nice_work")
     if re.search(r"\b(?:good job|nice|well done)\b", cleaned):
         return _state("amused", 0.62, "user_praise", confidence=0.80, match="short_praise")
     if re.search(r"\byou are\s+(?:funny|smart)\b", cleaned):
         return _state("amused", 0.65, "user_praise", confidence=0.82, match="you_are_praise")
+    if re.search(r"\b(?:mày làm tốt đấy|tự hào về mày|tự hào về bạn)\b", cleaned):
+        return _state("amused", 0.65, "user_praise", confidence=0.80, match="vietnamese_proud_praise")
     if re.search(r"\b(?:mày giỏi|hay đấy|tốt đấy)\b", cleaned):
         return _state("amused", 0.65, "user_praise", confidence=0.80, match="vietnamese_praise")
     return None
@@ -362,6 +382,19 @@ def _detect_emotion_meta_question(cleaned: str) -> str | None:
     return None
 
 
+def _detect_sarcastic_followup(cleaned: str) -> str | None:
+    patterns = (
+        (r"\bha ha\s+very funny\b", "ha_ha_very_funny"),
+        (r"\bhaha\s+very funny\b", "haha_very_funny"),
+        (r"\bvery funny\b", "very_funny"),
+        (r"^funny$", "funny"),
+    )
+    for pattern, name in patterns:
+        if re.search(pattern, cleaned):
+            return name
+    return None
+
+
 def _memory_carry_state(
     memory: EmotionMemory,
     *,
@@ -398,6 +431,25 @@ def _memory_carry_state(
         intensity,
         "emotion_meta_question",
         confidence=max(0.70, confidence),
+        source="memory",
+        match=match,
+    )
+
+
+def _sarcastic_followup_state(memory: EmotionMemory, *, match: str) -> EmotionState:
+    previous = memory.last_emotion or "deadpan"
+    intensity = 0.62 if previous in {"angry", "annoyed"} else 0.55
+    logger.info(
+        "EMOTION_MEMORY_CARRY: from=%s to=sarcastic intensity=%.2f "
+        "reason=sarcastic_followup source=memory",
+        previous,
+        intensity,
+    )
+    return _state(
+        "sarcastic",
+        intensity,
+        "sarcastic_followup",
+        confidence=0.78,
         source="memory",
         match=match,
     )
@@ -479,6 +531,22 @@ def select_emotion_with_memory(
                 ttl_sec=ttl_sec,
             ):
                 return _memory_carry_state(memory, match=meta_match, decay=decay)
+
+    sarcastic_match = _detect_sarcastic_followup(cleaned)
+    if sarcastic_match and memory.is_valid(
+        turn_id=turn_id,
+        now=now,
+        ttl_turns=ttl_turns,
+        ttl_sec=ttl_sec,
+    ) and memory.last_emotion in {"angry", "annoyed", "sarcastic"}:
+        state = _sarcastic_followup_state(memory, match=sarcastic_match)
+        memory.update_from_state(
+            state,
+            turn_id=turn_id,
+            now=now,
+            min_confidence=min_confidence,
+        )
+        return state
 
     memory.update_from_state(
         current,

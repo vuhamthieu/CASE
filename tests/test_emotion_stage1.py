@@ -70,6 +70,9 @@ class EmotionStage1Tests(unittest.TestCase):
     def test_requested_emotion_style_has_highest_priority(self):
         for text, emotion in (
             ("Can you can you be so angry for a moment?", "angry"),
+            ("sorry i mean can you get angry or moment", "angry"),
+            ("can you get angry for a moment", "angry"),
+            ("angry or moment", "angry"),
             ("speak angrily", "angry"),
             ("nói kiểu tức giận", "angry"),
             ("nói buồn hơn", "sad"),
@@ -79,17 +82,39 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertEqual(state.emotion, emotion)
                 self.assertEqual(state.reason, "requested_emotion_style")
                 self.assertEqual(state.source, "rules")
+                if "angry" in text or "moment" in text:
+                    self.assertIn(
+                        state.match,
+                        {"request_angry_style_fuzzy", "english_angry_style", "english_angry_speak"},
+                    )
 
         state = detect_emotion("Can you be angry and tell me a joke?")
         self.assertEqual(state.emotion, "angry")
         self.assertEqual(state.reason, "requested_emotion_style")
 
     def test_praise_selects_amused(self):
-        for text in ("good job", "nice", "you are funny", "mày giỏi đấy", "hay đấy"):
+        cases = {
+            "good job": "short_praise",
+            "nice": "short_praise",
+            "you are funny": "you_are_praise",
+            "I am so proud of you.": "proud_of_you",
+            "proud of you": "proud_of_you",
+            "good job CASE": "good_job_case",
+            "you did good": "you_did_well",
+            "you did well": "you_did_well",
+            "nice work": "nice_work",
+            "mày giỏi đấy": "vietnamese_praise",
+            "hay đấy": "vietnamese_praise",
+            "mày làm tốt đấy": "vietnamese_proud_praise",
+            "tự hào về mày": "vietnamese_proud_praise",
+            "tự hào về bạn": "vietnamese_proud_praise",
+        }
+        for text, match in cases.items():
             with self.subTest(text=text):
                 state = detect_emotion(text)
                 self.assertEqual(state.emotion, "amused")
                 self.assertEqual(state.reason, "user_praise")
+                self.assertEqual(state.match, match)
 
     def test_sadness_selects_sad(self):
         for text in ("I'm sad", "I'm tired", "I feel bad", "hôm nay tao buồn"):
@@ -210,6 +235,37 @@ class EmotionStage1Tests(unittest.TestCase):
                 self.assertGreaterEqual(state.intensity, 0.45)
                 self.assertLessEqual(state.intensity, 0.75)
 
+    def test_emotion_memory_exact_runtime_sequence(self):
+        memory = EmotionMemory()
+        state1 = select_emotion_with_memory(
+            "I am so bored of you.",
+            memory,
+            turn_id=1,
+            now=10.0,
+        )
+        self.assertEqual(state1.emotion, "angry")
+        self.assertEqual(state1.reason, "user_rejection")
+        self.assertEqual(memory.last_emotion, "angry")
+
+        state2 = select_emotion_with_memory(
+            "Are you not angry?",
+            memory,
+            turn_id=2,
+            now=12.0,
+        )
+        self.assertIn(state2.emotion, {"annoyed", "angry"})
+        self.assertEqual(state2.reason, "emotion_meta_question")
+        self.assertEqual(state2.source, "memory")
+
+        state3 = select_emotion_with_memory(
+            "What is Raspberry Pi?",
+            memory,
+            turn_id=3,
+            now=13.0,
+        )
+        self.assertEqual(state3.emotion, "deadpan")
+        self.assertEqual(state3.reason, "default_personality")
+
     def test_emotion_meta_question_does_not_invent_anger(self):
         state = select_emotion_with_memory(
             "Are you not angry?",
@@ -239,6 +295,51 @@ class EmotionStage1Tests(unittest.TestCase):
 
         self.assertEqual(state.emotion, "deadpan")
         self.assertEqual(state.reason, "default_personality")
+
+    def test_sarcastic_followup_requires_angry_or_sarcastic_context(self):
+        no_memory_state = select_emotion_with_memory(
+            "Ha ha, very funny.",
+            EmotionMemory(),
+            turn_id=1,
+            now=10.0,
+        )
+        self.assertEqual(no_memory_state.emotion, "deadpan")
+        self.assertEqual(no_memory_state.reason, "default_personality")
+
+        amused_memory = EmotionMemory()
+        select_emotion_with_memory(
+            "I am so proud of you.",
+            amused_memory,
+            turn_id=1,
+            now=10.0,
+        )
+        normal_praise_state = select_emotion_with_memory(
+            "Ha ha, very funny.",
+            amused_memory,
+            turn_id=2,
+            now=11.0,
+        )
+        self.assertEqual(normal_praise_state.emotion, "deadpan")
+        self.assertEqual(normal_praise_state.reason, "default_personality")
+
+        angry_memory = EmotionMemory()
+        select_emotion_with_memory(
+            "I am so bored of you.",
+            angry_memory,
+            turn_id=1,
+            now=10.0,
+        )
+        sarcastic_state = select_emotion_with_memory(
+            "Ha ha, very funny.",
+            angry_memory,
+            turn_id=2,
+            now=11.0,
+        )
+        self.assertEqual(sarcastic_state.emotion, "sarcastic")
+        self.assertEqual(sarcastic_state.reason, "sarcastic_followup")
+        self.assertEqual(sarcastic_state.source, "memory")
+        self.assertGreaterEqual(sarcastic_state.intensity, 0.55)
+        self.assertLessEqual(sarcastic_state.intensity, 0.65)
 
     def test_emotion_deescalation_uses_and_clears_memory(self):
         for text in ("calm down", "đừng giận"):
