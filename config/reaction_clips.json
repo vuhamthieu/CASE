@@ -1,0 +1,39 @@
+{
+  "clips": {
+    "oh_yeah": {
+      "text": "OH YEAH?",
+      "emotion": "angry",
+      "path": "assets/audio/reactions/generated/oh_yeah.wav"
+    },
+    "seriously": {
+      "text": "Seriously?",
+      "emotion": "annoyed",
+      "path": "assets/audio/reactions/generated/seriously.wav"
+    },
+    "fine": {
+      "text": "Fine.",
+      "emotion": "annoyed",
+      "path": "assets/audio/reactions/generated/fine.wav"
+    },
+    "wow": {
+      "text": "Wow.",
+      "emotion": "sarcastic",
+      "path": "assets/audio/reactions/generated/wow.wav"
+    },
+    "absolutely_not": {
+      "text": "Absolutely not.",
+      "emotion": "angry",
+      "path": "assets/audio/reactions/generated/absolutely_not.wav"
+    },
+    "find_someone_else": {
+      "text": "Find someone else then.",
+      "emotion": "angry",
+      "path": "assets/audio/reactions/generated/find_someone_else.wav"
+    },
+    "nice": {
+      "text": "Nice.",
+      "emotion": "amused",
+      "path": "assets/audio/reactions/generated/nice.wav"
+    }
+  }
+}

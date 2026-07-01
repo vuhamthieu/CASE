@@ -57,6 +57,7 @@ from src.voice_pipeline.thinking_filler import (
     play_thinking_filler_wav,
 )
 from src.persona.emotion import EmotionState, blend_tts_emotion_profile, parse_leading_emotion_tag
+from src.persona.reaction_clips import play_reaction_clip_wav
 
 
 if TYPE_CHECKING:
@@ -209,6 +210,7 @@ class CASEVoice:
         self.bus.subscribe("AI_SPEAK_STREAM_CHUNK", self.handle_stream_chunk)
         self.bus.subscribe("AI_SPEAK_STREAM_END", self.handle_stream_end)
         self.bus.subscribe("THINKING_FILLER_PLAY", self.handle_thinking_filler)
+        self.bus.subscribe("REACTION_CLIP_PLAY", self.handle_reaction_clip)
 
     def _ensure_workers(self) -> None:
         if self.tts_text_queue is None:
@@ -306,6 +308,9 @@ class CASEVoice:
     async def handle_stream_start(self, payload: dict) -> None:
         self._ensure_workers()
         turn_id = int(payload["turn_id"])
+        if turn_id in self._stream_started_turns:
+            logger.info("CASE_TTS: stream start already released turn=%s", turn_id)
+            return
         self._stream_pending_starts[turn_id] = {
             "kind": "start",
             "turn_id": turn_id,
@@ -412,6 +417,32 @@ class CASEVoice:
                 exc,
             )
 
+    async def handle_reaction_clip(self, payload: dict) -> None:
+        """Queue a cached reaction clip before the normal streamed response."""
+        self._ensure_workers()
+        assert self.audio_playback_queue is not None
+        turn_id = int(payload.get("turn_id", 0) or 0)
+        metrics = payload.get("metrics", {})
+        if turn_id not in self._stream_started_turns:
+            start_item = self._stream_pending_starts.pop(
+                turn_id,
+                {"kind": "start", "turn_id": turn_id, "metrics": metrics},
+            )
+            await self.audio_playback_queue.put(start_item)
+            self._stream_started_turns.add(turn_id)
+            logger.info("CASE_TTS: stream start released turn=%s reason=reaction_clip", turn_id)
+        await self.audio_playback_queue.put(
+            {
+                "kind": "reaction",
+                "turn_id": turn_id,
+                "clip_id": str(payload.get("clip_id", "")),
+                "text": str(payload.get("text", "")).strip(),
+                "path": str(payload.get("path", "")),
+                "metrics": metrics,
+                "queued_at": time.monotonic(),
+            }
+        )
+
     async def _synthesis_worker(self) -> None:
         assert self.tts_text_queue is not None
         assert self.audio_playback_queue is not None
@@ -515,6 +546,49 @@ class CASEVoice:
                         {"turn_id": active_turn, "reason": "CASE speaking"},
                     )
                     await asyncio.sleep(0)
+                    continue
+
+                if kind == "reaction":
+                    turn_id = item.get("turn_id")
+                    clip_id = item.get("clip_id", "")
+                    path = item.get("path", "")
+                    text = item.get("text", "")
+                    started = time.monotonic()
+                    logger.info(
+                        "REACTION_CLIP_PLAY: turn=%s clip=%s path=%s",
+                        turn_id,
+                        clip_id,
+                        path,
+                    )
+                    if text:
+                        active_text_parts.append(text)
+                        if CASE_CONSOLE_MODE != "clean":
+                            print(f"\033[96m[CASE]: {text}\033[0m")
+                    loop = asyncio.get_running_loop()
+                    self._answer_audio_active = True
+                    try:
+                        result = await loop.run_in_executor(
+                            self._playback_executor,
+                            play_reaction_clip_wav,
+                            path,
+                        )
+                        logger.info(
+                            "REACTION_CLIP_DONE: turn=%s clip=%s underflow=%s "
+                            "duration=%.3fs",
+                            turn_id,
+                            clip_id,
+                            result.get("underflow", False),
+                            time.monotonic() - started,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "REACTION_CLIP_FAILED: turn=%s clip=%s error=%s",
+                            turn_id,
+                            clip_id,
+                            exc,
+                        )
+                    finally:
+                        self._answer_audio_active = False
                     continue
 
                 if kind in {"audio", "direct"}:

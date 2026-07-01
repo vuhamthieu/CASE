@@ -57,6 +57,14 @@ from src.realtime.realtime_config import (
     CASE_EMOTION_MEMORY_MIN_CONFIDENCE,
     CASE_EMOTION_MEMORY_DECAY,
     CASE_EMOTION_META_QUESTIONS_ENABLED,
+    CASE_REACTION_CLIPS_ENABLED,
+    CASE_REACTION_CLIPS_DIR,
+    CASE_REACTION_CLIPS_MANIFEST,
+    CASE_REACTION_MIN_INTENSITY,
+    CASE_REACTION_COOLDOWN_SEC,
+    CASE_REACTION_MAX_PER_TURN,
+    CASE_REACTION_PLAY_BEFORE_MAIN_TTS,
+    CASE_REACTION_CANCEL_THINKING_FILLER,
     CASE_TTS_TINY_CHUNK_MAX_CHARS,
     CASE_TTS_DROP_OVERFLOW_IN_REALTIME,
     CASE_TTS_ENABLE_THINKING_FALLBACK,
@@ -93,6 +101,11 @@ from src.persona.emotion import (
     default_emotion_state,
     parse_leading_emotion_tag,
     select_emotion_with_memory,
+)
+from src.persona.reaction_clips import (
+    ReactionClipSelector,
+    load_reaction_manifest,
+    strip_leading_reaction_duplicate,
 )
 from src.voice_pipeline.tts_safe_text import safe_tts_text
 
@@ -376,6 +389,7 @@ class CASEPersonality:
         self._turn_numbers = count(1)
         self._emotion_turn_numbers = count(1)
         self._emotion_memory = EmotionMemory()
+        self._reaction_clip_selector = self._new_reaction_clip_selector()
         self._turn_lock = asyncio.Lock()
         self._thinking_ack_done = asyncio.Event()
         self._thinking_filler_tasks: dict[int, asyncio.Task] = {}
@@ -440,6 +454,15 @@ class CASEPersonality:
         self.message_bus.subscribe("TTS_END", self._on_tts_end)
         self.message_bus.subscribe("TURN_METRICS", self._on_turn_metrics)
         self._latest_turn_metrics: dict[str, float] = {}
+        logger.info(
+            "REACTION_CLIPS_CONFIG: enabled=%s dir=%s manifest=%s "
+            "min_intensity=%.2f cooldown=%.1f",
+            CASE_REACTION_CLIPS_ENABLED,
+            CASE_REACTION_CLIPS_DIR,
+            CASE_REACTION_CLIPS_MANIFEST,
+            CASE_REACTION_MIN_INTENSITY,
+            CASE_REACTION_COOLDOWN_SEC,
+        )
 
     async def _on_tts_end(self, payload) -> None:
         self._thinking_ack_done.set()
@@ -463,6 +486,60 @@ class CASEPersonality:
         self._thinking_ack_done.clear()
         await self._publish_and_yield("AI_SPEAK", THINKING_ACK_TEXT)
         await self._thinking_ack_done.wait()
+
+    @staticmethod
+    def _new_reaction_clip_selector() -> ReactionClipSelector:
+        clips = load_reaction_manifest(CASE_REACTION_CLIPS_MANIFEST)
+        return ReactionClipSelector(
+            clips,
+            min_intensity=CASE_REACTION_MIN_INTENSITY,
+            cooldown_sec=CASE_REACTION_COOLDOWN_SEC,
+            max_per_turn=CASE_REACTION_MAX_PER_TURN,
+        )
+
+    def _reaction_selector(self) -> ReactionClipSelector:
+        selector = getattr(self, "_reaction_clip_selector", None)
+        if selector is None:
+            selector = self._new_reaction_clip_selector()
+            self._reaction_clip_selector = selector
+        return selector
+
+    async def _maybe_publish_reaction_clip(
+        self,
+        turn_id: int,
+        user_text: str,
+        emotion_state: EmotionState,
+        metrics: dict,
+    ) -> None:
+        if not CASE_REACTION_CLIPS_ENABLED or not CASE_REACTION_PLAY_BEFORE_MAIN_TTS:
+            logger.info("REACTION_SKIP: reason=disabled")
+            return
+        selection = self._reaction_selector().choose(
+            emotion_state,
+            user_text=user_text,
+            turn_id=turn_id,
+        )
+        if selection is None:
+            return
+        if CASE_REACTION_CANCEL_THINKING_FILLER:
+            self._cancel_thinking_filler(turn_id, metrics, "reaction_clip")
+        metrics["reaction_clip_id"] = selection.clip_id
+        metrics["reaction_text"] = selection.text
+        metrics["reaction_path"] = str(selection.path)
+        metrics["reaction_reason"] = selection.reason
+        await self._publish_stream_start_once(turn_id, metrics)
+        await self._publish_and_yield(
+            "REACTION_CLIP_PLAY",
+            {
+                "turn_id": turn_id,
+                "clip_id": selection.clip_id,
+                "text": selection.text,
+                "path": str(selection.path),
+                "reason": selection.reason,
+                "emotion": selection.emotion,
+                "metrics": metrics,
+            },
+        )
 
     async def _select_emotion(self, user_text: str) -> EmotionState:
         if CASE_TTS_EMOTION_ENABLED:
@@ -633,6 +710,12 @@ class CASEPersonality:
             metrics["transcript_final_at"],
         )
         self._schedule_thinking_filler(turn_id, user_text, metrics)
+        await self._maybe_publish_reaction_clip(
+            turn_id,
+            user_text,
+            emotion_state,
+            metrics,
+        )
         chunker = self._new_stream_chunker(metrics)
         extractor = DialogueJsonExtractor()
         raw_response = ""
@@ -652,6 +735,12 @@ class CASEPersonality:
             CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC,
         )
         prompt_text = build_emotion_user_message(user_text, emotion_state)
+        if metrics.get("reaction_text"):
+            prompt_text += (
+                "\n\nInternal note: A short reaction audio clip may play before "
+                f'your response: "{metrics["reaction_text"]}". Do not repeat '
+                "that exact phrase. Continue with the main response in CASE's style."
+            )
         try:
             stream = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -913,6 +1002,12 @@ class CASEPersonality:
             metrics["emotion_match"] = tag_state.match
             self._log_emotion_state(tag_state)
         original_text = text
+        if metrics.get("reaction_text"):
+            text = strip_leading_reaction_duplicate(
+                text,
+                str(metrics.get("reaction_text", "")),
+                str(metrics.get("reaction_clip_id", "")),
+            )
         text = self._style_safe_response(
             text,
             user_text=str(metrics.get("user_text", "")),

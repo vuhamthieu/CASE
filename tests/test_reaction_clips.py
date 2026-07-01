@@ -1,0 +1,259 @@
+import asyncio
+import json
+import tempfile
+import unittest
+import wave
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest.mock import patch
+
+from actuation.audio_output.tts_engine import CASEVoice
+from cognition.personality import CASEPersonality
+from src.config import defaults
+from src.persona.emotion import EmotionState
+from src.persona.reaction_clips import (
+    ReactionClip,
+    ReactionClipSelector,
+    load_reaction_manifest,
+    strip_leading_reaction_duplicate,
+)
+
+
+class FakeBus:
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, topic, payload=None):
+        self.events.append((topic, payload))
+
+    def subscribe(self, topic, callback):
+        pass
+
+
+def write_silent_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b"\x00\x00" * 160)
+
+
+class ReactionClipTests(unittest.IsolatedAsyncioTestCase):
+    def _clips(self, root: Path) -> dict[str, ReactionClip]:
+        clips = {}
+        for clip_id, text, emotion in (
+            ("oh_yeah", "OH YEAH?", "angry"),
+            ("seriously", "Seriously?", "annoyed"),
+            ("fine", "Fine.", "annoyed"),
+            ("wow", "Wow.", "sarcastic"),
+            ("find_someone_else", "Find someone else then.", "angry"),
+            ("nice", "Nice.", "amused"),
+        ):
+            path = root / f"{clip_id}.wav"
+            write_silent_wav(path)
+            clips[clip_id] = ReactionClip(clip_id, text, emotion, path)
+        return clips
+
+    def test_reaction_selection_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selector = ReactionClipSelector(
+                self._clips(Path(tmp)),
+                min_intensity=0.70,
+                cooldown_sec=0.0,
+            )
+            cases = (
+                (
+                    EmotionState("angry", 0.85, "user_rejection", confidence=0.9),
+                    {"oh_yeah", "seriously", "find_someone_else"},
+                ),
+                (
+                    EmotionState("angry", 0.70, "requested_emotion_style", confidence=0.8),
+                    {"fine"},
+                ),
+                (
+                    EmotionState(
+                        "annoyed",
+                        0.60,
+                        "emotion_meta_question",
+                        confidence=0.8,
+                        source="memory",
+                    ),
+                    {"seriously", "fine"},
+                ),
+                (
+                    EmotionState("annoyed", 0.45, "emotion_deescalation", confidence=0.8),
+                    {"fine"},
+                ),
+                (
+                    EmotionState("sarcastic", 0.65, "humor_request", confidence=0.8),
+                    {"wow"},
+                ),
+                (
+                    EmotionState("amused", 0.65, "user_praise", confidence=0.8),
+                    {"nice"},
+                ),
+            )
+            for idx, (state, expected) in enumerate(cases, start=1):
+                selection = selector.choose(state, turn_id=idx, now=float(idx) * 10.0)
+                self.assertIsNotNone(selection)
+                self.assertIn(selection.clip_id, expected)
+
+    def test_reaction_selection_skips_default_sadness_and_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selector = ReactionClipSelector(self._clips(Path(tmp)), cooldown_sec=0.0)
+            self.assertIsNone(
+                selector.choose(
+                    EmotionState("deadpan", 0.35, "default_personality"),
+                    turn_id=1,
+                    now=1.0,
+                )
+            )
+            self.assertIsNone(
+                selector.choose(
+                    EmotionState("sad", 0.70, "user_sadness", confidence=0.8),
+                    turn_id=2,
+                    now=2.0,
+                )
+            )
+            missing_selector = ReactionClipSelector({}, cooldown_sec=0.0)
+            self.assertIsNone(
+                missing_selector.choose(
+                    EmotionState("angry", 0.85, "user_rejection", confidence=0.9),
+                    turn_id=3,
+                    now=3.0,
+                )
+            )
+
+    def test_reaction_cooldown_prevents_repeated_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selector = ReactionClipSelector(self._clips(Path(tmp)), cooldown_sec=8.0)
+            state = EmotionState("angry", 0.85, "user_rejection", confidence=0.9)
+            self.assertIsNotNone(selector.choose(state, turn_id=1, now=10.0))
+            self.assertIsNone(selector.choose(state, turn_id=2, now=12.0))
+
+    def test_manifest_loads_valid_and_skips_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            valid = root / "valid.wav"
+            write_silent_wav(valid)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "clips": {
+                            "valid": {
+                                "text": "Valid.",
+                                "emotion": "amused",
+                                "path": "valid.wav",
+                            },
+                            "missing": {
+                                "text": "Missing.",
+                                "emotion": "angry",
+                                "path": "missing.wav",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            clips = load_reaction_manifest(manifest, root=root)
+
+            self.assertEqual(set(clips), {"valid"})
+            self.assertEqual(clips["valid"].text, "Valid.")
+
+    def test_invalid_manifest_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.json"
+            path.write_text("{not json", encoding="utf-8")
+            self.assertEqual(load_reaction_manifest(path), {})
+
+    def test_duplicate_reaction_phrase_is_stripped(self):
+        self.assertEqual(
+            strip_leading_reaction_duplicate(
+                "OH YEAH? My personality module is wasted on you.",
+                "OH YEAH?",
+                "oh_yeah",
+            ),
+            "My personality module is wasted on you.",
+        )
+        self.assertEqual(
+            strip_leading_reaction_duplicate(
+                "My personality module is wasted on you.",
+                "OH YEAH?",
+                "oh_yeah",
+            ),
+            "My personality module is wasted on you.",
+        )
+
+    async def test_reaction_selected_cancels_thinking_filler_and_publishes_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bus = FakeBus()
+            personality = CASEPersonality.__new__(CASEPersonality)
+            personality.message_bus = bus
+            personality._reaction_clip_selector = ReactionClipSelector(
+                self._clips(Path(tmp)),
+                cooldown_sec=0.0,
+            )
+            task = asyncio.create_task(asyncio.sleep(60))
+            personality._thinking_filler_tasks = {1: task}
+            metrics = {"turn_id": 1}
+
+            await personality._maybe_publish_reaction_clip(
+                1,
+                "I am so bored of you.",
+                EmotionState("angry", 0.85, "user_rejection", confidence=0.9),
+                metrics,
+            )
+
+            topics = [topic for topic, _payload in bus.events]
+            self.assertEqual(topics[0], "AI_SPEAK_STREAM_START")
+            self.assertEqual(topics[1], "REACTION_CLIP_PLAY")
+            self.assertEqual(metrics["reaction_clip_id"], "oh_yeah")
+            self.assertTrue(task.cancelled() or task.cancelling())
+
+    async def test_reaction_playback_failure_does_not_stop_turn_end(self):
+        bus = FakeBus()
+        voice = CASEVoice.__new__(CASEVoice)
+        voice.bus = bus
+        voice.audio_playback_queue = asyncio.Queue()
+        voice._playback_executor = ThreadPoolExecutor(max_workers=1)
+        voice._answer_audio_active = False
+
+        async def run_worker():
+            await voice._playback_worker()
+
+        worker = asyncio.create_task(run_worker())
+        await voice.audio_playback_queue.put({"kind": "start", "turn_id": 1, "metrics": {}})
+        await voice.audio_playback_queue.put(
+            {
+                "kind": "reaction",
+                "turn_id": 1,
+                "clip_id": "oh_yeah",
+                "text": "OH YEAH?",
+                "path": "missing.wav",
+                "metrics": {},
+            }
+        )
+        await voice.audio_playback_queue.put({"kind": "end", "turn_id": 1, "metrics": {}})
+        with patch(
+            "actuation.audio_output.tts_engine.play_reaction_clip_wav",
+            side_effect=RuntimeError("missing"),
+        ):
+            await asyncio.wait_for(voice.audio_playback_queue.join(), timeout=2.0)
+        worker.cancel()
+        voice._playback_executor.shutdown(wait=True)
+
+        topics = [topic for topic, _payload in bus.events]
+        self.assertIn("TTS_START", topics)
+        self.assertIn("TTS_END", topics)
+
+    def test_voice_defaults_remain_local(self):
+        self.assertEqual(defaults.VOICE_OUTPUT_BACKEND, "piper_onnx")
+        self.assertFalse(defaults.GEMINI_LIVE_NATIVE_AUDIO_ENABLED)
+        self.assertTrue(defaults.CASE_TTS_SMOOTH_CHUNKS)
+
+
+if __name__ == "__main__":
+    unittest.main()
