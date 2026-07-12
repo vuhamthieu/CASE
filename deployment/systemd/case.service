@@ -1,0 +1,28 @@
+# CASE systemd service
+#
+# This unit is intentionally kiosk-ready but does not require a graphical desktop.
+# It runs the robot from the project entry script so developers and systemd use
+# the same startup path.
+#
+# Installation is manual. Do not enable or start this service automatically.
+
+[Unit]
+Description=CASE Robot Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/vuhamthieu/Projects/CASE
+ExecStart=/home/vuhamthieu/Projects/CASE/scripts/run_case.sh
+Restart=always
+RestartSec=3
+# Journald captures stdout and stderr by default.
+StandardOutput=journal
+StandardError=journal
+# Keep the process attached to the console-less service environment.
+KillMode=control-group
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
