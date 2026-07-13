@@ -7,11 +7,11 @@ from threading import Event, Thread
 from time import monotonic, sleep
 
 from rich.align import Align
-from rich import box
+from rich.console import Group
 from rich.console import Console
 from rich.live import Live
 from rich.layout import Layout
-from rich.panel import Panel
+from rich.rule import Rule
 from rich.text import Text
 
 from .conversation_model import ConversationMessage, ConversationModel, ConversationSnapshot, SystemMetrics
@@ -105,11 +105,7 @@ class DisplayRenderer:
 
     def _render_header(self, status: str):
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
-        return Panel(
-            Align.left(header),
-            box=box.BLANK,
-            padding=(0, 1),
-        )
+        return Group(Align.left(header), Rule(style=self._theme.panel_line))
 
     def _render_body(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
         rendered = Text(justify="left")
@@ -121,18 +117,6 @@ class DisplayRenderer:
                     width=self._body_width(),
                 )
             )
-            rendered.append("\n")
-        return Panel(
-            Align.left(rendered),
-            box=box.BLANK,
-            padding=(0, 1),
-        )
-
-    def _render_messages(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
-        rendered = Text(justify="left")
-        for speaker, text, is_streaming in self._select_turns(messages, current_stream_text):
-            rendered.append(f"[{speaker}]\n", style=self._theme.muted)
-            rendered.append(self._wrap_text(text + ("▋" if is_streaming and cursor_visible else ""), width=self._body_width()))
             rendered.append("\n")
         return Align.left(rendered)
 
@@ -153,11 +137,7 @@ class DisplayRenderer:
                 f"[dim white]VOICE READY[/dim white]"
             )
         )
-        return Panel(
-            Align.left(footer),
-            box=box.BLANK,
-            padding=(0, 1),
-        )
+        return Group(Align.left(footer), Rule(style=self._theme.panel_line))
 
     def _select_turns(self, messages: tuple[ConversationMessage, ...], current_stream_text: str) -> list[tuple[str, str, bool]]:
         selected = list(messages[-self._config.history_turns :])
