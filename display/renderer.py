@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from threading import Event, Thread
 from time import monotonic, sleep
 
+from rich.console import Console, Group
 from rich.align import Align
-from rich.console import Console
+from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
 
@@ -58,16 +59,18 @@ class DisplayRenderer:
         self._ready_event.set()
         last_redraw = 0.0
         redraw_interval = 1.0 / max(1, self._config.fps)
-        while not self._stop_event.is_set():
-            snapshot = self._model.snapshot()
-            cursor_visible = self._stream_cursor_visible(snapshot)
-            signature = self._build_signature(snapshot, cursor_visible)
-            now = monotonic()
-            if signature != self._last_signature or (now - last_redraw) >= redraw_interval:
-                self._render_snapshot(snapshot, cursor_visible)
-                self._last_signature = signature
-                last_redraw = now
-            sleep(0.02)
+        with Live(console=self._console, auto_refresh=False, screen=True, transient=False) as live:
+            while not self._stop_event.is_set():
+                snapshot = self._model.snapshot()
+                cursor_visible = self._stream_cursor_visible(snapshot)
+                signature = self._build_signature(snapshot, cursor_visible)
+                now = monotonic()
+                if signature != self._last_signature or (now - last_redraw) >= redraw_interval:
+                    layout = self._build_layout(snapshot, cursor_visible)
+                    live.update(layout, refresh=True)
+                    self._last_signature = signature
+                    last_redraw = now
+                sleep(0.02)
 
     def _stream_cursor_visible(self, snapshot: ConversationSnapshot) -> bool:
         if not snapshot.current_stream_text:
@@ -84,13 +87,14 @@ class DisplayRenderer:
             cursor_visible,
         )
 
-    def _render_snapshot(self, snapshot: ConversationSnapshot, cursor_visible: bool) -> None:
-        self._console.clear(home=True)
-        self._console.print(self._render_header(snapshot.status))
-        self._console.print(Rule(style=self._style_for_line(snapshot.status)))
-        self._console.print(self._render_messages(snapshot.messages, snapshot.current_stream_text, cursor_visible))
-        self._console.print(Rule(style=self._theme.panel_line))
-        self._console.print(self._render_footer(snapshot.metrics))
+    def _build_layout(self, snapshot: ConversationSnapshot, cursor_visible: bool):
+        return Group(
+            self._render_header(snapshot.status),
+            Rule(style=self._style_for_line(snapshot.status)),
+            self._render_messages(snapshot.messages, snapshot.current_stream_text, cursor_visible),
+            Rule(style=self._theme.panel_line),
+            self._render_footer(snapshot.metrics),
+        )
 
     def _render_header(self, status: str):
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
