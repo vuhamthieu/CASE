@@ -107,7 +107,7 @@ class DisplayRenderer:
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
         return Panel(
             Align.left(header),
-            box=box.NULL,
+            box=box.BLANK,
             padding=(0, 1),
         )
 
@@ -124,7 +124,7 @@ class DisplayRenderer:
             rendered.append("\n")
         return Panel(
             Align.left(rendered),
-            box=box.NULL,
+            box=box.BLANK,
             padding=(0, 1),
         )
 
@@ -155,7 +155,7 @@ class DisplayRenderer:
         )
         return Panel(
             Align.left(footer),
-            box=box.NULL,
+            box=box.BLANK,
             padding=(0, 1),
         )
 
