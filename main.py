@@ -8,6 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 from src.utils.console_transcript import configure_case_logging, console
 from src.audio.playback_manager import close_playback_manager
+from display.display_manager import DisplayManager
+from display.bus_adapter import DisplayBusAdapter
 
 debug_log_path = configure_case_logging(PROJECT_ROOT)
 
@@ -399,9 +401,19 @@ async def boot_sequence():
     print(banner)
 
     background_tasks: list[asyncio.Task] = []
+    display_manager: DisplayManager | None = None
     try:
         await bus.publish("STT_DISABLE", "booting")
         await asyncio.sleep(0)
+
+        try:
+            display_manager = DisplayManager()
+            DisplayBusAdapter(bus, display_manager)
+            display_manager.start()
+            logger.info("DISPLAY: subsystem online and tracking telemetry")
+        except Exception as exc:
+            display_manager = None
+            logger.warning("DISPLAY: subsystem bypassed or failed: %s", exc)
 
         # Start long-running loops as background tasks first.
         stt_task = asyncio.create_task(stt.run())
@@ -445,6 +457,8 @@ async def boot_sequence():
             vision_scheduler.stop()
         if vision is not None:
             vision.stop()
+        if display_manager is not None:
+            display_manager.stop()
         for task in background_tasks:
             if not task.done():
                 task.cancel()
