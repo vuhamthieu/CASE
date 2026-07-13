@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from threading import Event, Thread
 from time import monotonic, sleep
 
-from rich.console import Console, Group
 from rich.align import Align
+from rich.console import Console
 from rich.live import Live
-from rich.rule import Rule
+from rich.layout import Layout
+from rich.panel import Panel
 from rich.text import Text
 
 from .conversation_model import ConversationMessage, ConversationModel, ConversationSnapshot, SystemMetrics
@@ -59,7 +60,7 @@ class DisplayRenderer:
         self._ready_event.set()
         last_redraw = 0.0
         redraw_interval = 1.0 / max(1, self._config.fps)
-        with Live(console=self._console, auto_refresh=False, screen=True, transient=False) as live:
+        with Live(console=self._console, screen=True, refresh_per_second=15) as live:
             while not self._stop_event.is_set():
                 snapshot = self._model.snapshot()
                 cursor_visible = self._stream_cursor_visible(snapshot)
@@ -67,7 +68,7 @@ class DisplayRenderer:
                 now = monotonic()
                 if signature != self._last_signature or (now - last_redraw) >= redraw_interval:
                     layout = self._build_layout(snapshot, cursor_visible)
-                    live.update(layout, refresh=True)
+                    live.update(layout)
                     self._last_signature = signature
                     last_redraw = now
                 sleep(0.02)
@@ -88,17 +89,43 @@ class DisplayRenderer:
         )
 
     def _build_layout(self, snapshot: ConversationSnapshot, cursor_visible: bool):
-        return Group(
-            self._render_header(snapshot.status),
-            Rule(style=self._style_for_line(snapshot.status)),
-            self._render_messages(snapshot.messages, snapshot.current_stream_text, cursor_visible),
-            Rule(style=self._theme.panel_line),
-            self._render_footer(snapshot.metrics),
+        root = Layout(name="root")
+        root.split_column(
+            Layout(self._render_header(snapshot.status), name="header", size=3),
+            Layout(
+                self._render_body(snapshot.messages, snapshot.current_stream_text, cursor_visible),
+                name="body",
+                ratio=1,
+                minimum_size=10,
+            ),
+            Layout(self._render_footer(snapshot.metrics), name="footer", size=3),
         )
+        return root
 
     def _render_header(self, status: str):
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
-        return Align.left(header)
+        return Panel(
+            Align.left(header),
+            border_style=self._theme.panel_line,
+            padding=(0, 1),
+        )
+
+    def _render_body(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
+        rendered = Text(justify="left")
+        for speaker, text, is_streaming in self._select_turns(messages, current_stream_text):
+            rendered.append(f"[{speaker}]\n", style=self._theme.muted)
+            rendered.append(
+                self._wrap_text(
+                    text + ("▋" if is_streaming and cursor_visible else ""),
+                    width=self._body_width(),
+                )
+            )
+            rendered.append("\n")
+        return Panel(
+            Align.left(rendered),
+            border_style=self._theme.panel_line,
+            padding=(0, 1),
+        )
 
     def _render_messages(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
         rendered = Text(justify="left")
@@ -118,7 +145,11 @@ class DisplayRenderer:
             f"MIC {metrics.mic_state}   NET {metrics.network_status}   SPEAKER {metrics.speaker_state}   VOICE READY",
             style=self._theme.muted,
         )
-        return Align.left(footer)
+        return Panel(
+            Align.left(footer),
+            border_style=self._theme.panel_line,
+            padding=(0, 1),
+        )
 
     def _select_turns(self, messages: tuple[ConversationMessage, ...], current_stream_text: str) -> list[tuple[str, str, bool]]:
         selected = list(messages[-self._config.history_turns :])
