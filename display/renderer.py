@@ -23,7 +23,7 @@ from .widgets.status_bar import StatusBar
 
 @dataclass(frozen=True, slots=True)
 class RendererConfig:
-    size: tuple[int, int] = (800, 480)
+    size: tuple[int, int] = (640, 480)
     fps: int = 30
     title: str = "CASE"
     cursor_blink_seconds: float = 0.5
@@ -74,14 +74,19 @@ class DisplayRenderer:
         pygame.init()
         pygame.font.init()
         try:
-            flags = pygame.FULLSCREEN | pygame.SCALED | pygame.DOUBLEBUF
-            self._screen = pygame.display.set_mode(self._config.size, flags)
+            flags = pygame.FULLSCREEN | pygame.DOUBLEBUF
+            self._screen = pygame.display.set_mode(self._config.size, flags, vsync=1)
             pygame.display.set_caption(self._config.title)
             self._font = self._get_font(24)
             self._small_font = self._get_font(18)
-            self._status_bar = StatusBar(self._font, self._theme)
-            self._message_view = MessageView(self._font, self._small_font, self._theme)
-            self._footer = Footer(self._small_font, self._small_font, self._theme)
+            screen_width, screen_height = self._config.size
+            content_width = max(1, screen_width - 40)
+            status_layout = self._build_status_layout(content_width)
+            footer_layout = self._build_footer_layout(screen_width, screen_height, content_width)
+            message_layout = self._build_message_layout(screen_width, footer_layout.y, content_width)
+            self._status_bar = StatusBar(self._font, self._theme, status_layout)
+            self._message_view = MessageView(self._font, self._small_font, self._theme, message_layout)
+            self._footer = Footer(self._small_font, self._small_font, self._theme, footer_layout)
             self._ready_event.set()
             while not self._stop_event.is_set():
                 self._handle_events()
@@ -148,3 +153,21 @@ class DisplayRenderer:
         )
         self._footer.render(self._screen, snapshot.metrics)
         pygame.display.flip()
+
+    def _build_status_layout(self, content_width: int):
+        from .widgets.status_bar import StatusBarLayout
+
+        return StatusBarLayout(x=20, y=18, width=content_width)
+
+    def _build_message_layout(self, screen_width: int, footer_y: int, content_width: int):
+        from .widgets.message_view import MessageViewLayout
+
+        message_y = 72
+        message_height = max(1, footer_y - message_y - 24)
+        return MessageViewLayout(x=20, y=message_y, width=content_width, height=message_height)
+
+    def _build_footer_layout(self, screen_width: int, screen_height: int, content_width: int):
+        from .widgets.footer import FooterLayout
+
+        footer_y = max(18, screen_height - 74)
+        return FooterLayout(x=20, y=footer_y, width=content_width)
