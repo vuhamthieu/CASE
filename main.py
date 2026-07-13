@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import traceback
 from pathlib import Path
 from typing import Callable
 
@@ -76,7 +77,9 @@ logger = logging.getLogger(__name__)
 try:
     from display.display_manager import DisplayManager
     from display.bus_adapter import DisplayBusAdapter
-except ModuleNotFoundError:
+except ModuleNotFoundError as exc:
+    print(f"DISPLAY import failed: {exc}", flush=True)
+    traceback.print_exc()
     DisplayManager = None  # type: ignore[assignment]
     DisplayBusAdapter = None  # type: ignore[assignment]
 
