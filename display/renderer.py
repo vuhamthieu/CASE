@@ -74,8 +74,9 @@ class DisplayRenderer:
         pygame.init()
         pygame.font.init()
         try:
-            flags = pygame.FULLSCREEN | pygame.DOUBLEBUF
-            self._screen = pygame.display.set_mode(self._config.size, flags, vsync=1)
+            # Software rendering fallback: CPU draws directly to the framebuffer
+            flags = pygame.FULLSCREEN
+            self._screen = pygame.display.set_mode(self._config.size, flags)
             pygame.display.set_caption(self._config.title)
             self._font = self._get_font(24)
             self._small_font = self._get_font(18)
