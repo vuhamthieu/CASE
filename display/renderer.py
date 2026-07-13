@@ -106,7 +106,7 @@ class DisplayRenderer:
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
         return Panel(
             Align.left(header),
-            border_style=self._theme.panel_line,
+            box=None,
             padding=(0, 1),
         )
 
@@ -123,7 +123,7 @@ class DisplayRenderer:
             rendered.append("\n")
         return Panel(
             Align.left(rendered),
-            border_style=self._theme.panel_line,
+            box=None,
             padding=(0, 1),
         )
 
@@ -137,17 +137,24 @@ class DisplayRenderer:
 
     def _render_footer(self, metrics: SystemMetrics):
         footer = Text(justify="left")
-        footer.append(
-            f"CPU {metrics.cpu_percent:.0f}%   RAM {metrics.ram_percent:.0f}%   TEMP {metrics.temperature:.0f}C\n",
-            style=self._theme.foreground,
+        footer.append_text(
+            Text.from_markup(
+                f"{self._metric_markup('CPU', metrics.cpu_percent, 80)}   "
+                f"{self._metric_markup('RAM', metrics.ram_percent, 80)}   "
+                f"{self._temp_markup(metrics.temperature)}\n"
+            )
         )
-        footer.append(
-            f"MIC {metrics.mic_state}   NET {metrics.network_status}   SPEAKER {metrics.speaker_state}   VOICE READY",
-            style=self._theme.muted,
+        footer.append_text(
+            Text.from_markup(
+                f"{self._state_markup('MIC', metrics.mic_state)}   "
+                f"{self._state_markup('NET', metrics.network_status)}   "
+                f"{self._state_markup('SPEAKER', metrics.speaker_state)}   "
+                f"[dim white]VOICE READY[/dim white]"
+            )
         )
         return Panel(
             Align.left(footer),
-            border_style=self._theme.panel_line,
+            box=None,
             padding=(0, 1),
         )
 
@@ -188,3 +195,26 @@ class DisplayRenderer:
         if status_name in {"LISTENING"}:
             return "bold white"
         return "white"
+
+    @staticmethod
+    def _metric_markup(label: str, value: float, threshold: float) -> str:
+        color = "red" if value >= threshold else "white"
+        return f"[{color}]{label} {value:.0f}%[/{color}]"
+
+    @staticmethod
+    def _temp_markup(value: float) -> str:
+        color = "red" if value >= 75 else "white"
+        return f"[{color}]TEMP {value:.0f}C[/{color}]"
+
+    @staticmethod
+    def _state_markup(label: str, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if normalized in {"LIVE", "ACTIVE", "OK"}:
+            color = "green"
+        elif normalized in {"READY", "QUIET"}:
+            color = "dim white"
+        elif normalized in {"UNKNOWN", "OFF", "CHECK"}:
+            color = "red"
+        else:
+            color = "white"
+        return f"[{color}]{label} {normalized or 'UNKNOWN'}[/{color}]"
