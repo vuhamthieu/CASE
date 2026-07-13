@@ -1,32 +1,29 @@
-"""Pygame renderer thread for the CASE display."""
+"""Rich-based terminal renderer for the CASE display."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Event, Thread
-from time import monotonic
+from time import monotonic, sleep
+from typing import Iterable
 
-try:
-    import pygame
-except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency guard
-    pygame = None  # type: ignore[assignment]
-    _PYGAME_IMPORT_ERROR = exc
-else:
-    _PYGAME_IMPORT_ERROR = None
+from rich.align import Align
+from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.text import Text
 
-from .conversation_model import ConversationModel, ConversationSnapshot
+from .conversation_model import ConversationMessage, ConversationModel, ConversationSnapshot, SystemMetrics
 from .theme import Theme, theme as default_theme
-from .widgets.footer import Footer
-from .widgets.message_view import MessageView
-from .widgets.status_bar import StatusBar
 
 
 @dataclass(frozen=True, slots=True)
 class RendererConfig:
-    size: tuple[int, int] = (640, 480)
     fps: int = 30
     title: str = "CASE"
     cursor_blink_seconds: float = 0.5
+    history_turns: int = 4
+    min_terminal_width: int = 80
 
 
 class DisplayRenderer:
@@ -39,19 +36,10 @@ class DisplayRenderer:
         self._stop_event = Event()
         self._ready_event = Event()
         self._thread: Thread | None = None
-        self._screen: pygame.Surface | None = None
-        self._font: pygame.font.Font | None = None
-        self._small_font: pygame.font.Font | None = None
-        self._status_bar: StatusBar | None = None
-        self._message_view: MessageView | None = None
-        self._footer: Footer | None = None
         self._last_signature: tuple[object, ...] | None = None
-        self._clock = pygame.time.Clock()
-        self._font_cache: dict[tuple[str, int, bool], pygame.font.Font] = {}
+        self._console = Console(force_terminal=True, color_system=None, highlight=False)
 
     def start(self) -> None:
-        if pygame is None:
-            raise RuntimeError("pygame is required to start the CASE display renderer") from _PYGAME_IMPORT_ERROR
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
@@ -61,8 +49,6 @@ class DisplayRenderer:
         self._ready_event.wait(timeout=5.0)
 
     def stop(self) -> None:
-        if pygame is None:
-            return
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
@@ -71,58 +57,19 @@ class DisplayRenderer:
         return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
-        pygame.init()
-        pygame.font.init()
-        try:
-            # Software rendering fallback: CPU draws directly to the framebuffer
-            flags = pygame.FULLSCREEN
-            self._screen = pygame.display.set_mode(self._config.size, flags)
-            pygame.display.set_caption(self._config.title)
-            self._font = self._get_font(24)
-            self._small_font = self._get_font(18)
-            screen_width, screen_height = self._config.size
-            content_width = max(1, screen_width - 40)
-            status_layout = self._build_status_layout(content_width)
-            footer_layout = self._build_footer_layout(screen_width, screen_height, content_width)
-            message_layout = self._build_message_layout(screen_width, footer_layout.y, content_width)
-            self._status_bar = StatusBar(self._font, self._theme, status_layout)
-            self._message_view = MessageView(self._font, self._small_font, self._theme, message_layout)
-            self._footer = Footer(self._small_font, self._small_font, self._theme, footer_layout)
-            self._ready_event.set()
-            while not self._stop_event.is_set():
-                self._handle_events()
-                snapshot = self._model.snapshot()
-                cursor_visible = self._stream_cursor_visible(snapshot)
-                signature = self._build_signature(snapshot, cursor_visible)
-                if signature != self._last_signature:
-                    self._render_snapshot(snapshot, cursor_visible)
-                    self._last_signature = signature
-                self._clock.tick(self._config.fps)
-        finally:
-            pygame.quit()
-
-    def _handle_events(self) -> None:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self._stop_event.set()
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                self._stop_event.set()
-
-    def _get_font(self, size: int, *, bold: bool = False) -> pygame.font.Font:
-        key = ("monospace", size, bold)
-        cached = self._font_cache.get(key)
-        if cached is not None:
-            return cached
-        candidates = ["DejaVu Sans Mono", "Liberation Mono", "Monospace", "Courier New"]
-        font = None
-        for candidate in candidates:
-            font = pygame.font.SysFont(candidate, size, bold=bold)
-            if font is not None:
-                break
-        if font is None:
-            font = pygame.font.Font(None, size)
-        self._font_cache[key] = font
-        return font
+        self._ready_event.set()
+        last_redraw = 0.0
+        redraw_interval = 1.0 / max(1, self._config.fps)
+        while not self._stop_event.is_set():
+            snapshot = self._model.snapshot()
+            cursor_visible = self._stream_cursor_visible(snapshot)
+            signature = self._build_signature(snapshot, cursor_visible)
+            now = monotonic()
+            if signature != self._last_signature or (now - last_redraw) >= redraw_interval:
+                self._render_snapshot(snapshot, cursor_visible)
+                self._last_signature = signature
+                last_redraw = now
+            sleep(0.02)
 
     def _stream_cursor_visible(self, snapshot: ConversationSnapshot) -> bool:
         if not snapshot.current_stream_text:
@@ -140,35 +87,71 @@ class DisplayRenderer:
         )
 
     def _render_snapshot(self, snapshot: ConversationSnapshot, cursor_visible: bool) -> None:
-        if self._screen is None or self._font is None or self._small_font is None or self._status_bar is None or self._message_view is None or self._footer is None:
-            return
+        self._console.clear(home=True)
+        self._console.print(self._render_header(snapshot.status))
+        self._console.print(Rule(style=self._style_for_line(snapshot.status)))
+        self._console.print(self._render_messages(snapshot.messages, snapshot.current_stream_text, cursor_visible))
+        self._console.print(Rule(style=self._theme.panel_line))
+        self._console.print(self._render_footer(snapshot.metrics))
 
-        self._screen.fill(self._theme.background)
-        self._status_bar.render(self._screen, snapshot.status)
-        self._message_view.render(
-            self._screen,
-            snapshot.messages,
-            snapshot.current_stream_text,
-            bool(snapshot.current_stream_text),
-            cursor_visible,
+    def _render_header(self, status: str):
+        header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
+        return Align.left(header)
+
+    def _render_messages(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
+        rendered = Text(justify="left")
+        for speaker, text, is_streaming in self._select_turns(messages, current_stream_text):
+            rendered.append(f"[{speaker}]\n", style=self._theme.muted)
+            rendered.append(self._wrap_text(text + ("▋" if is_streaming and cursor_visible else ""), width=self._body_width()))
+            rendered.append("\n")
+        return Align.left(rendered)
+
+    def _render_footer(self, metrics: SystemMetrics):
+        footer = Text(justify="left")
+        footer.append(
+            f"CPU {metrics.cpu_percent:.0f}%   RAM {metrics.ram_percent:.0f}%   TEMP {metrics.temperature:.0f}C\n",
+            style=self._theme.foreground,
         )
-        self._footer.render(self._screen, snapshot.metrics)
-        pygame.display.flip()
+        footer.append(
+            f"MIC {metrics.mic_state}   NET {metrics.network_status}   SPEAKER {metrics.speaker_state}   VOICE READY",
+            style=self._theme.muted,
+        )
+        return Align.left(footer)
 
-    def _build_status_layout(self, content_width: int):
-        from .widgets.status_bar import StatusBarLayout
+    def _select_turns(self, messages: tuple[ConversationMessage, ...], current_stream_text: str) -> list[tuple[str, str, bool]]:
+        selected = list(messages[-self._config.history_turns :])
+        turns: list[tuple[str, str, bool]] = [(message.speaker, message.text, False) for message in selected]
+        if current_stream_text:
+            turns.append(("CASE", current_stream_text, True))
+        return turns
 
-        return StatusBarLayout(x=20, y=18, width=content_width)
+    def _wrap_text(self, text: str, width: int) -> Text:
+        width = max(10, width)
+        wrapped = Text()
+        words = text.split()
+        if not words:
+            wrapped.append("\n")
+            return wrapped
+        line = words[0]
+        for word in words[1:]:
+            candidate = f"{line} {word}"
+            if len(candidate) <= width:
+                line = candidate
+            else:
+                wrapped.append(f"{line}\n", style=self._theme.foreground)
+                line = word
+        wrapped.append(line, style=self._theme.foreground)
+        return wrapped
 
-    def _build_message_layout(self, screen_width: int, footer_y: int, content_width: int):
-        from .widgets.message_view import MessageViewLayout
+    def _body_width(self) -> int:
+        return max(self._config.min_terminal_width, self._console.width or self._config.min_terminal_width) - 4
 
-        message_y = 72
-        message_height = max(1, footer_y - message_y - 24)
-        return MessageViewLayout(x=20, y=message_y, width=content_width, height=message_height)
-
-    def _build_footer_layout(self, screen_width: int, screen_height: int, content_width: int):
-        from .widgets.footer import FooterLayout
-
-        footer_y = max(18, screen_height - 74)
-        return FooterLayout(x=20, y=footer_y, width=content_width)
+    def _style_for_line(self, status: str) -> str:
+        status_name = status.upper()
+        if status_name in {"SPEAKING", "ACTIVE"}:
+            return "bold white"
+        if status_name in {"THINKING"}:
+            return "bold bright_white"
+        if status_name in {"LISTENING"}:
+            return "bold white"
+        return "white"

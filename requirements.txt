@@ -6,6 +6,7 @@ onnxruntime
 piper-tts
 pyserial
 python-dotenv
+rich
 scipy
 sherpa-onnx
 sounddevice
