@@ -90,7 +90,7 @@ class _LevelColorFormatter(logging.Formatter):
 
 
 def configure_case_logging(project_root: Path) -> Path:
-    """Send full diagnostics to a file and selected records to stderr."""
+    """Send full diagnostics to a file and only error-level records to stderr."""
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
@@ -109,18 +109,8 @@ def configure_case_logging(project_root: Path) -> Path:
     )
     root.addHandler(file_handler)
 
-    console_handler = logging.StreamHandler()
-    if CASE_CONSOLE_MODE == "debug":
-        console_level = logging.INFO
-    else:
-        console_level = getattr(
-            logging,
-            CASE_CONSOLE_LOG_LEVEL.upper(),
-            logging.WARNING,
-        )
-    console_handler.setLevel(console_level)
-    console_handler.setFormatter(
-        _LevelColorFormatter("%(asctime)s %(levelname)s %(message)s")
-    )
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.ERROR)
+    console_handler.setFormatter(_LevelColorFormatter("%(asctime)s %(levelname)s %(message)s"))
     root.addHandler(console_handler)
     return debug_path

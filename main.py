@@ -1,3 +1,7 @@
+import os
+
+os.environ["VOSK_LOG_LEVEL"] = "-1"
+
 import asyncio
 import logging
 import time
