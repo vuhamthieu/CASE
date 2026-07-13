@@ -789,8 +789,8 @@ class STTEngine:
         logging.info("Loading Vosk endpoint model from: %s", self.model_path)
 
         # Vosk writes native C++ diagnostics directly to stderr. Its supported
-        # log-level hook is the least invasive way to keep clean mode readable.
-        if CASE_CONSOLE_MODE == "clean" and VoskSetLogLevel is not None:
+        # log-level hook is the least invasive way to keep the TUI readable.
+        if VoskSetLogLevel is not None:
             VoskSetLogLevel(-1)
 
         if not self.model_path.is_dir():
