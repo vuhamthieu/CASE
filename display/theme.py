@@ -7,16 +7,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Theme:
-    background: tuple[int, int, int] = (0, 0, 0)
-    foreground: tuple[int, int, int] = (245, 245, 245)
-    muted: tuple[int, int, int] = (170, 170, 170)
-    accent: tuple[int, int, int] = (255, 255, 255)
-    warning: tuple[int, int, int] = (255, 196, 0)
-    success: tuple[int, int, int] = (140, 255, 140)
-    error: tuple[int, int, int] = (255, 110, 110)
-    panel_line: tuple[int, int, int] = (55, 55, 55)
-    separator: tuple[int, int, int] = (80, 80, 80)
-    cursor: tuple[int, int, int] = (245, 245, 245)
+    background: str = "black"
+    foreground: str = "white"
+    muted: str = "bright_black"
+    accent: str = "white"
+    warning: str = "yellow"
+    success: str = "green"
+    error: str = "red"
+    panel_line: str = "bright_black"
+    separator: str = "bright_black"
+    cursor: str = "white"
 
 
 theme = Theme()

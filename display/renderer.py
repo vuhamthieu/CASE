@@ -5,11 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Event, Thread
 from time import monotonic, sleep
-from typing import Iterable
 
 from rich.align import Align
 from rich.console import Console
-from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
