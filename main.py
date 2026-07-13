@@ -1,6 +1,41 @@
+import ctypes
 import os
 
 os.environ["VOSK_LOG_LEVEL"] = "-1"
+
+
+_ALSA_ERROR_HANDLER = None
+
+
+def _mute_alsa_errors() -> None:
+    """Suppress ALSA/libasound diagnostics that bypass Python logging."""
+    global _ALSA_ERROR_HANDLER
+
+    try:
+        libasound = ctypes.CDLL("libasound.so.2")
+    except OSError:
+        return
+
+    handler_type = ctypes.CFUNCTYPE(
+        None,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+    )
+
+    def _handler(file_name, line, function, err, fmt):  # noqa: ANN001
+        return
+
+    _ALSA_ERROR_HANDLER = handler_type(_handler)
+    try:
+        libasound.snd_lib_error_set_handler(_ALSA_ERROR_HANDLER)
+    except AttributeError:
+        return
+
+
+_mute_alsa_errors()
 
 import asyncio
 import logging
