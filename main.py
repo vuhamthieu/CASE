@@ -8,8 +8,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 from src.utils.console_transcript import configure_case_logging, console
 from src.audio.playback_manager import close_playback_manager
-from display.display_manager import DisplayManager
-from display.bus_adapter import DisplayBusAdapter
 
 debug_log_path = configure_case_logging(PROJECT_ROOT)
 
@@ -74,6 +72,13 @@ VISION_GREETING_TEXT = "I see you."
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    from display.display_manager import DisplayManager
+    from display.bus_adapter import DisplayBusAdapter
+except ModuleNotFoundError:
+    DisplayManager = None  # type: ignore[assignment]
+    DisplayBusAdapter = None  # type: ignore[assignment]
 
 
 class VisionEventHandler:
@@ -406,14 +411,17 @@ async def boot_sequence():
         await bus.publish("STT_DISABLE", "booting")
         await asyncio.sleep(0)
 
-        try:
-            display_manager = DisplayManager()
-            DisplayBusAdapter(bus, display_manager)
-            display_manager.start()
-            logger.info("DISPLAY: subsystem online and tracking telemetry")
-        except Exception as exc:
-            display_manager = None
-            logger.warning("DISPLAY: subsystem bypassed or failed: %s", exc)
+        if DisplayManager is not None and DisplayBusAdapter is not None:
+            try:
+                display_manager = DisplayManager()
+                DisplayBusAdapter(bus, display_manager)
+                display_manager.start()
+                logger.info("DISPLAY: subsystem online and tracking telemetry")
+            except Exception as exc:
+                display_manager = None
+                logger.warning("DISPLAY: subsystem bypassed or failed: %s", exc)
+        else:
+            logger.warning("DISPLAY: subsystem bypassed; display modules not available")
 
         # Start long-running loops as background tasks first.
         stt_task = asyncio.create_task(stt.run())
