@@ -562,8 +562,7 @@ class CASEVoice:
                     )
                     if text:
                         active_text_parts.append(text)
-                        if CASE_CONSOLE_MODE != "clean":
-                            print(f"\033[96m[CASE]: {text}\033[0m")
+                        logger.debug("REACTION_CLIP_TEXT: turn=%s clip=%s text=%s", turn_id, clip_id, text)
                     loop = asyncio.get_running_loop()
                     self._answer_audio_active = True
                     try:
@@ -604,8 +603,12 @@ class CASEVoice:
                         item.get("sequence"),
                     )
                     active_text_parts.append(item["text"])
-                    if CASE_CONSOLE_MODE != "clean":
-                        print(f"\033[96m[CASE]: {item['text']}\033[0m")
+                    logger.debug(
+                        "TTS_PLAYBACK_TEXT: turn=%s seq=%s text=%s",
+                        item.get("turn_id"),
+                        item.get("sequence"),
+                        item["text"],
+                    )
                     loop = asyncio.get_running_loop()
                     self._answer_audio_active = True
                     try:
