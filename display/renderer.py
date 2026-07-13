@@ -7,6 +7,7 @@ from threading import Event, Thread
 from time import monotonic, sleep
 
 from rich.align import Align
+from rich import box
 from rich.console import Console
 from rich.live import Live
 from rich.layout import Layout
@@ -106,7 +107,7 @@ class DisplayRenderer:
         header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
         return Panel(
             Align.left(header),
-            box=None,
+            box=box.NULL,
             padding=(0, 1),
         )
 
@@ -123,7 +124,7 @@ class DisplayRenderer:
             rendered.append("\n")
         return Panel(
             Align.left(rendered),
-            box=None,
+            box=box.NULL,
             padding=(0, 1),
         )
 
@@ -154,7 +155,7 @@ class DisplayRenderer:
         )
         return Panel(
             Align.left(footer),
-            box=None,
+            box=box.NULL,
             padding=(0, 1),
         )
 
