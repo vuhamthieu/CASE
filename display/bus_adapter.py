@@ -18,7 +18,6 @@ class DisplayBusAdapter:
         self.dm = display_manager
 
         self.bus.subscribe("USER_SPOKE", self._on_user_spoke)
-        self.bus.subscribe("CHAT_USER_SPOKE", self._on_user_spoke)
         self.bus.subscribe("AI_SPEAK", self._on_ai_speak)
         self.bus.subscribe("TTS_START", self._on_tts_start)
         self.bus.subscribe("TTS_END", self._on_tts_end)
