@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from threading import RLock
-from time import time
+from pathlib import Path
+from threading import Event, RLock, Thread
+from time import sleep, time
 from typing import Literal
+
+try:
+    import psutil
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    psutil = None  # type: ignore[assignment]
 
 Speaker = Literal["YOU", "CASE", "SYSTEM"]
 
@@ -47,6 +53,8 @@ class ConversationModel:
         self._current_stream_text = ""
         self._metrics = SystemMetrics()
         self._last_update = time()
+        self._telemetry_stop = Event()
+        self._telemetry_thread: Thread | None = None
 
     def set_status(self, status: str) -> None:
         with self._lock:
@@ -102,6 +110,60 @@ class ConversationModel:
                 speaker_state=metrics.speaker_state if speaker_state is None else speaker_state,
             )
             self._last_update = time()
+
+    def start_telemetry(self) -> None:
+        if self._telemetry_thread is not None and self._telemetry_thread.is_alive():
+            return
+        self._telemetry_stop.clear()
+        self._telemetry_thread = Thread(target=self._telemetry_loop, name="case-display-telemetry", daemon=True)
+        self._telemetry_thread.start()
+
+    def stop_telemetry(self) -> None:
+        self._telemetry_stop.set()
+        if self._telemetry_thread is not None and self._telemetry_thread.is_alive():
+            self._telemetry_thread.join(timeout=2.0)
+
+    def _telemetry_loop(self) -> None:
+        if psutil is not None:
+            psutil.cpu_percent(interval=None)
+        while not self._telemetry_stop.is_set():
+            cpu_percent = self._read_cpu_percent()
+            ram_percent = self._read_ram_percent()
+            temperature = self._read_temperature_celsius()
+            self.update_system_metrics(
+                cpu_percent=cpu_percent,
+                ram_percent=ram_percent,
+                temperature=temperature,
+            )
+            if self._telemetry_stop.wait(1.0):
+                break
+
+    @staticmethod
+    def _read_cpu_percent() -> float:
+        if psutil is None:
+            return 0.0
+        try:
+            return float(psutil.cpu_percent(interval=None))
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _read_ram_percent() -> float:
+        if psutil is None:
+            return 0.0
+        try:
+            return float(psutil.virtual_memory().percent)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _read_temperature_celsius() -> float:
+        temp_path = Path("/sys/class/thermal/thermal_zone0/temp")
+        try:
+            raw_value = temp_path.read_text(encoding="utf-8").strip()
+            return float(raw_value) / 1000.0
+        except Exception:
+            return 0.0
 
     def snapshot(self) -> ConversationSnapshot:
         with self._lock:

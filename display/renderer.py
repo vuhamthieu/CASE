@@ -7,8 +7,7 @@ from threading import Event, Thread
 from time import monotonic, sleep
 
 from rich.align import Align
-from rich.console import Group
-from rich.console import Console
+from rich.console import Group, Console
 from rich.live import Live
 from rich.layout import Layout
 from rich.rule import Rule
@@ -121,21 +120,14 @@ class DisplayRenderer:
         return Align.left(rendered)
 
     def _render_footer(self, metrics: SystemMetrics):
-        footer = Text(justify="left")
-        footer.append_text(
-            Text.from_markup(
-                f"{self._metric_markup('CPU', metrics.cpu_percent, 80)}   "
-                f"{self._metric_markup('RAM', metrics.ram_percent, 80)}   "
-                f"{self._temp_markup(metrics.temperature)}\n"
-            )
-        )
-        footer.append_text(
-            Text.from_markup(
-                f"{self._state_markup('MIC', metrics.mic_state)}   "
-                f"{self._state_markup('NET', metrics.network_status)}   "
-                f"{self._state_markup('SPEAKER', metrics.speaker_state)}   "
-                f"[dim white]VOICE READY[/dim white]"
-            )
+        footer = Text.from_markup(
+            f"{self._metric_markup('CPU', metrics.cpu_percent, 80)}   "
+            f"{self._metric_markup('RAM', metrics.ram_percent, 80)}   "
+            f"{self._temp_markup(metrics.temperature)}\n"
+            f"{self._state_markup('MIC', metrics.mic_state)}   "
+            f"{self._state_markup('NET', metrics.network_status)}   "
+            f"{self._state_markup('SPEAKER', metrics.speaker_state)}   "
+            f"[dim white]VOICE READY[/dim white]"
         )
         return Group(Align.left(footer), Rule(style=self._theme.panel_line))
 

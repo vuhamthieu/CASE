@@ -15,9 +15,11 @@ class DisplayManager:
         self._renderer = DisplayRenderer(self.model, theme=theme, config=config)
 
     def start(self) -> None:
+        self.model.start_telemetry()
         self._renderer.start()
 
     def stop(self) -> None:
+        self.model.stop_telemetry()
         self._renderer.stop()
 
     def is_running(self) -> bool:
