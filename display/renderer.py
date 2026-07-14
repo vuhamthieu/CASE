@@ -98,7 +98,7 @@ class DisplayRenderer:
                 ratio=1,
                 minimum_size=10,
             ),
-            Layout(self._render_footer(snapshot.metrics), name="footer", size=3),
+            Layout(self._render_footer(snapshot.metrics), name="footer", size=2),
         )
         return root
 
@@ -123,11 +123,7 @@ class DisplayRenderer:
         footer = Text.from_markup(
             f"{self._metric_markup('CPU', metrics.cpu_percent, 80)}   "
             f"{self._metric_markup('RAM', metrics.ram_percent, 80)}   "
-            f"{self._temp_markup(metrics.temperature)}\n"
-            f"{self._state_markup('MIC', metrics.mic_state)}   "
-            f"{self._state_markup('NET', metrics.network_status)}   "
-            f"{self._state_markup('SPEAKER', metrics.speaker_state)}   "
-            f"[dim white]VOICE READY[/dim white]"
+            f"{self._temp_markup(metrics.temperature)}"
         )
         return Group(Align.left(footer), Rule(style=self._theme.panel_line))
 
@@ -179,15 +175,3 @@ class DisplayRenderer:
         color = "red" if value >= 75 else "white"
         return f"[{color}]TEMP {value:.0f}C[/{color}]"
 
-    @staticmethod
-    def _state_markup(label: str, value: str) -> str:
-        normalized = (value or "").strip().upper()
-        if normalized in {"LIVE", "ACTIVE", "OK"}:
-            color = "green"
-        elif normalized in {"READY", "QUIET"}:
-            color = "dim white"
-        elif normalized in {"UNKNOWN", "OFF", "CHECK"}:
-            color = "red"
-        else:
-            color = "white"
-        return f"[{color}]{label} {normalized or 'UNKNOWN'}[/{color}]"
