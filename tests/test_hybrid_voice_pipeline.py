@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from src.config import defaults
-from cognition.personality import CASEPersonality
+from src.cognition.personality import CASEPersonality
 from actuation.audio_output.tts_engine import (
     CASEVoice,
     PIPER_SAMPLE_RATE,
@@ -371,8 +371,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.02)
             return func(*args, **kwargs)
 
-        with patch("cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 0.01), patch(
-            "cognition.personality.asyncio.to_thread",
+        with patch("src.cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 0.01), patch(
+            "src.cognition.personality.asyncio.to_thread",
             new=fake_to_thread,
         ):
             completed = await personality._handle_streaming_response("tell me a joke")
@@ -414,10 +414,10 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
                 calls["full"] += 1
             return func(*args, **kwargs)
 
-        with patch("cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 1.0), patch(
-            "cognition.personality.CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC",
+        with patch("src.cognition.personality.CASE_LLM_FIRST_TOKEN_TIMEOUT_SEC", 1.0), patch(
+            "src.cognition.personality.CASE_LLM_STREAM_TOTAL_TIMEOUT_SEC",
             0.02,
-        ), patch("cognition.personality.asyncio.to_thread", new=fake_to_thread):
+        ), patch("src.cognition.personality.asyncio.to_thread", new=fake_to_thread):
             completed = await personality._handle_streaming_response("tell me a joke")
 
         self.assertTrue(completed)
@@ -441,8 +441,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
             "user_text": "how are you",
         }
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
             0.05,
         ):
             personality._schedule_thinking_filler(11, "how are you", metrics)
@@ -460,10 +460,10 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {}
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
             0.01,
-        ), patch("cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
+        ), patch("src.cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
             personality._schedule_thinking_filler(
                 12,
                 "explain what you are doing",
@@ -483,10 +483,10 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {"transcript_accept_reason": "followup_feedback"}
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
             0.01,
-        ), self.assertLogs("cognition.personality", level="INFO") as logs:
+        ), self.assertLogs("src.cognition.personality", level="INFO") as logs:
             personality._schedule_thinking_filler(18, "very funny", metrics)
             await asyncio.sleep(0.02)
 
@@ -505,8 +505,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {}
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
             0.01,
         ):
             personality._schedule_thinking_filler(19, "very funny", metrics)
@@ -524,8 +524,8 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {}
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
             0.01,
         ):
             personality._schedule_thinking_filler(
@@ -546,11 +546,11 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {}
 
-        with patch("cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
-            "cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
+        with patch("src.cognition.personality.CASE_ENABLE_THINKING_FILLER", True), patch(
+            "src.cognition.personality.CASE_THINKING_FILLER_AFTER_SEC",
             0.01,
         ), patch(
-            "cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
+            "src.cognition.personality.CASE_THINKING_FILLER_SIMPLE_AFTER_SEC",
             0.05,
         ):
             personality._schedule_thinking_filler(13, "how are you", metrics)
@@ -572,7 +572,7 @@ class HybridVoiceTests(unittest.IsolatedAsyncioTestCase):
         personality._thinking_filler_tasks = {}
         metrics = {"thinking_filler_played": 1}
 
-        with patch("cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
+        with patch("src.cognition.personality.CASE_THINKING_FILLER_MAX_PER_TURN", 1):
             await personality._maybe_play_thinking_filler(
                 14,
                 0.0,

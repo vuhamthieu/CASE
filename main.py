@@ -52,7 +52,7 @@ from src.audio.playback_manager import close_playback_manager
 debug_log_path = configure_case_logging(PROJECT_ROOT)
 
 from middleware.message_bus import AsyncMessageBus
-from cognition.personality import CASEPersonality
+from src.cognition.personality import CASEPersonality
 from actuation.serial_comms import SerialBridge
 from actuation.audio_output.tts_engine import CASEVoice
 from perception.audio.stt_engine import STATE_IDLE, STTEngine

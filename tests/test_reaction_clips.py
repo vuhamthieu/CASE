@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from actuation.audio_output.tts_engine import CASEVoice
-from cognition.personality import CASEPersonality
+from src.cognition.personality import CASEPersonality
 from src.config import defaults
 from src.persona.emotion import EmotionState
 from src.persona.reaction_clips import (

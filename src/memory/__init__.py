@@ -4,6 +4,7 @@ from .memory_types import MemoryItem, TurnRecord
 from .persistent_memory import PersistentMemory
 from .repetition_guard import RepetitionGuard
 from .session_memory import MemoryContext, SessionMemory
+from .core_memory import CoreMemory, case_memory
 
 __all__ = [
     "MemoryContext",
@@ -12,4 +13,6 @@ __all__ = [
     "RepetitionGuard",
     "SessionMemory",
     "TurnRecord",
+    "CoreMemory",
+    "case_memory",
 ]

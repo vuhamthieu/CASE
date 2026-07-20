@@ -14,11 +14,28 @@ from .realtime_config import (
     VISION_TOOL_TIMEOUT_SEC,
 )
 from src.vision.vision_engine import run_vision_once
+from src.memory.core_memory import case_memory
 
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_ROOT = (PROJECT_ROOT / "output").resolve()
+
+
+def update_core_memory(key: str, value: str) -> str:
+    """Updates the core memory with a key-value pair.
+
+    Use this tool to save critical user facts, preferences, names, and other enduring information
+    about the user or environment that should be remembered across sessions.
+
+    Args:
+        key: The memory key or category (e.g., 'user_name', 'favorite_color', 'user_birthday').
+        value: The memory value or detail to be stored (e.g., 'Alice', 'blue', 'October 5th').
+
+    Returns:
+        A confirmation message indicating success or failure.
+    """
+    return case_memory.update_memory(key, value)
 
 
 TOOL_DECLARATIONS = [
@@ -75,6 +92,28 @@ TOOL_DECLARATIONS = [
             "required": ["command"],
         },
     },
+    {
+        "name": "update_core_memory",
+        "description": (
+            "Updates CASE's core memory with a key-value pair. Use this to save critical "
+            "user facts, preferences, names, and other enduring information about the user "
+            "or environment that should be remembered across sessions."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "key": {
+                    "type": "STRING",
+                    "description": "The memory key or category (e.g., 'user_name', 'favorite_color').",
+                },
+                "value": {
+                    "type": "STRING",
+                    "description": "The memory value or detail to be stored (e.g., 'Alice', 'blue').",
+                },
+            },
+            "required": ["key", "value"],
+        },
+    },
 ]
 
 
@@ -116,6 +155,10 @@ class RealtimeToolRouter:
             ),
             "case_motion_request": (
                 self._motion_request,
+                REALTIME_TOOL_TIMEOUT_SEC,
+            ),
+            "update_core_memory": (
+                self._update_core_memory,
                 REALTIME_TOOL_TIMEOUT_SEC,
             ),
         }
@@ -241,3 +284,15 @@ class RealtimeToolRouter:
             "command": command,
             "reason": "motor control disabled in realtime v1",
         }
+
+    async def _update_core_memory(self, args: dict) -> dict[str, Any]:
+        key = str(args.get("key", "")).strip()
+        value = str(args.get("value", "")).strip()
+        if not key or not value:
+            return {"ok": False, "error": "key and value are required"}
+        try:
+            result = await asyncio.to_thread(update_core_memory, key, value)
+            return {"ok": True, "message": result}
+        except Exception as exc:
+            logger.exception("REALTIME: update_core_memory failed")
+            return {"ok": False, "error": str(exc)}

@@ -95,6 +95,7 @@ from src.realtime.realtime_config import (
 )
 from src.realtime.realtime_persona import build_case_system_instruction
 from src.realtime.response_chunker import ResponseChunker as StreamingResponseChunker
+from src.memory.core_memory import case_memory
 from src.persona.emotion import (
     EmotionMemory,
     EmotionState,
@@ -446,6 +447,15 @@ class CASEPersonality:
                 "\"action\" (a body command, or \"IDLE\" when no movement is needed). Do not "
                 "wrap the JSON in Markdown."
             )
+
+        # Inject core memory facts
+        memory_facts = case_memory.get_all()
+        system_instruction += (
+            "\n\n### CORE MEMORY FACTS ###\n"
+            f"{memory_facts}\n"
+            "Use the `update_core_memory` tool if you learn new facts, preferences, names, "
+            "or key details about the user or the environment."
+        )
 
         self.chat_session = self.client.chats.create(
             model=GEMINI_MODEL,
