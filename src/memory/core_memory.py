@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 class CoreMemory:
     """Manages persistent core memory facts stored in a root-level JSON file."""
 
-    def __init__(self) -> None:
-        self.file_path = Path(__file__).resolve().parents[2] / "core_memory.json"
+    def __init__(self, filepath: str | Path | None = None) -> None:
+        self.file_path = Path(filepath) if filepath is not None else Path(__file__).resolve().parents[2] / "core_memory.json"
         self._ensure_file()
 
     def _ensure_file(self) -> None:
         """Create a blank JSON file if it does not exist, safely wrapping file IO."""
         try:
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
             if not self.file_path.exists():
                 logger.info("Initializing new core memory file at %s", self.file_path)
                 with open(self.file_path, "w", encoding="utf-8") as f:

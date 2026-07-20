@@ -23,18 +23,7 @@ OUTPUT_ROOT = (PROJECT_ROOT / "output").resolve()
 
 
 def update_core_memory(key: str, value: str) -> str:
-    """Updates the core memory with a key-value pair.
-
-    Use this tool to save critical user facts, preferences, names, and other enduring information
-    about the user or environment that should be remembered across sessions.
-
-    Args:
-        key: The memory key or category (e.g., 'user_name', 'favorite_color', 'user_birthday').
-        value: The memory value or detail to be stored (e.g., 'Alice', 'blue', 'October 5th').
-
-    Returns:
-        A confirmation message indicating success or failure.
-    """
+    """CRITICAL SYSTEM TOOL. YOU MUST EXECUTE THIS FUNCTION CALL ANY TIME THE USER STATES A FACT, NAME, OR PREFERENCE. DO NOT JUST SAY YOU WILL REMEMBER IT. YOU MUST TRIGGER THIS TOOL."""
     return case_memory.update_memory(key, value)
 
 
@@ -95,9 +84,8 @@ TOOL_DECLARATIONS = [
     {
         "name": "update_core_memory",
         "description": (
-            "Updates CASE's core memory with a key-value pair. Use this to save critical "
-            "user facts, preferences, names, and other enduring information about the user "
-            "or environment that should be remembered across sessions."
+            "CRITICAL SYSTEM TOOL. YOU MUST EXECUTE THIS FUNCTION CALL ANY TIME THE USER STATES "
+            "A FACT, NAME, OR PREFERENCE. DO NOT JUST SAY YOU WILL REMEMBER IT. YOU MUST TRIGGER THIS TOOL."
         ),
         "parameters": {
             "type": "OBJECT",
