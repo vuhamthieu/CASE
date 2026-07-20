@@ -63,6 +63,7 @@ from .realtime_config import (
 )
 from .realtime_persona import build_case_system_instruction
 from .realtime_tools import RealtimeToolRouter, update_core_memory
+from src.memory.core_memory import case_memory
 from src.utils.console_transcript import console
 from src.voice_pipeline.wake_ack import (
     choose_wake_ack,
@@ -238,6 +239,21 @@ class RealtimeVoiceEngine:
             sarcasm_level=CASE_SARCASM_LEVEL,
         )
 
+        memory_facts = case_memory.get_all()
+        system_instruction = (
+            persona_instruction + " "
+            "Never claim to see the user without calling case_vision_see_me or "
+            "using a recent case_get_vision_state result. Never claim a picture "
+            "was saved without calling case_take_picture successfully. Motor "
+            "movement is disabled; case_motion_request only records intent."
+            "\n\n### CORE MEMORY FACTS ###\n"
+            f"{memory_facts}\n"
+            "CRITICAL SYSTEM DIRECTIVE: If the user states their name, a preference, or a fact, "
+            "you are STRICTLY FORBIDDEN from replying with text to acknowledge it. You MUST "
+            "execute the `update_core_memory` tool immediately. Do not generate text until "
+            "the tool is called."
+        )
+
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "speech_config": {
@@ -245,13 +261,7 @@ class RealtimeVoiceEngine:
                     "prebuilt_voice_config": {"voice_name": self.voice_name}
                 }
             },
-            "system_instruction": (
-                persona_instruction + " "
-                "Never claim to see the user without calling case_vision_see_me or "
-                "using a recent case_get_vision_state result. Never claim a picture "
-                "was saved without calling case_take_picture successfully. Motor "
-                "movement is disabled; case_motion_request only records intent."
-            ),
+            "system_instruction": system_instruction,
             "realtime_input_config": {
                 "automatic_activity_detection": {
                     "disabled": False,
@@ -269,7 +279,12 @@ class RealtimeVoiceEngine:
         config["tools"] = [
             {"function_declarations": self.tool_router.declarations}
         ]
-        logger.info("LLM_MODE: tool_enabled with update_core_memory explicitly passed")
+        config["tool_config"] = types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode="AUTO"
+            )
+        )
+        logger.info("LLM_MODE: tool_enabled with update_core_memory and tool_config AUTO explicitly passed")
 
         client = genai.Client(api_key=GEMINI_API_KEY)
         ack_task: Optional[asyncio.Task] = None
@@ -555,6 +570,7 @@ class RealtimeVoiceEngine:
         while self._stop_event is not None and not self._stop_event.is_set():
             turn = session.receive()
             async for response in turn:
+                print(f"[DEBUG RAW PAYLOAD]: {response}", flush=True)
                 await self._handle_response(session, response, types)
 
     async def _handle_response(self, session, response, types) -> None:
