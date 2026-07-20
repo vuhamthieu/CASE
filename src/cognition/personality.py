@@ -453,11 +453,10 @@ class CASEPersonality:
         system_instruction += (
             "\n\n### CORE MEMORY FACTS ###\n"
             f"{memory_facts}\n"
-            "Use the `update_core_memory` tool if you learn new facts, preferences, names, "
-            "or key details about the user or the environment.\n"
-            "If the user provides new information about themselves, YOU ARE STRICTLY FORBIDDEN "
-            "from simply acknowledging it in text. You MUST call the `update_core_memory` tool "
-            "immediately to write it to disk."
+            "CRITICAL SYSTEM DIRECTIVE: If the user states their name, a preference, or a fact, "
+            "you are STRICTLY FORBIDDEN from replying with text to acknowledge it. You MUST "
+            "execute the `update_core_memory` tool immediately. Do not generate text until "
+            "the tool is called."
         )
 
         self.chat_session = self.client.chats.create(

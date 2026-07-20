@@ -62,7 +62,7 @@ from .realtime_config import (
     REALTIME_WAKE_ACK_TEXT,
 )
 from .realtime_persona import build_case_system_instruction
-from .realtime_tools import RealtimeToolRouter
+from .realtime_tools import RealtimeToolRouter, update_core_memory
 from src.utils.console_transcript import console
 from src.voice_pipeline.wake_ack import (
     choose_wake_ack,
@@ -265,13 +265,11 @@ class RealtimeVoiceEngine:
         if REALTIME_ENABLE_TRANSCRIPTS:
             config["input_audio_transcription"] = {}
             config["output_audio_transcription"] = {}
-        if REALTIME_ENABLE_TOOLS:
-            config["tools"] = [
-                {"function_declarations": self.tool_router.declarations}
-            ]
-            logger.info("LLM_MODE: tool_enabled reason=realtime_tools_enabled")
-        else:
-            logger.info("LLM_MODE: plain_text_stream tools_enabled=False")
+        # Ensure update_core_memory tool is registered and explicitly passed into the Gemini model configuration
+        config["tools"] = [
+            {"function_declarations": self.tool_router.declarations}
+        ]
+        logger.info("LLM_MODE: tool_enabled with update_core_memory explicitly passed")
 
         client = genai.Client(api_key=GEMINI_API_KEY)
         ack_task: Optional[asyncio.Task] = None
