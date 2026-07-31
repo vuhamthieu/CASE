@@ -139,8 +139,18 @@ class AudioPlaybackManager:
 
             duration = len(payload) / float(self._sample_rate)
             guard = self.tail_guard_sec if tail_guard_sec is None else tail_guard_sec
+
+            # Avoid cutting off the tail of responses (the "Guillotine Effect").
+            # Query actual stream latency (in seconds) and wait for the hardware buffer to drain.
+            stream_latency = getattr(self._stream, "latency", 0.15)
+            if not isinstance(stream_latency, (int, float)) or stream_latency <= 0:
+                stream_latency = 0.15
+            drain_time = stream_latency + 0.03
+
             if duration >= 1.2 and tail_guard_sec is None:
-                guard = 0.0
+                guard = drain_time
+            else:
+                guard = max(guard, drain_time)
 
             try:
                 self._stream.start()

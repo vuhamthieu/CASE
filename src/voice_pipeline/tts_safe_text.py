@@ -28,7 +28,10 @@ WEAK_TRAILING_WORDS = frozenset(
 
 
 def clean_tts_text(text: str) -> str:
-    return " ".join(str(text or "").strip().split())
+    # Normalize punctuation spacing (e.g., "learning.It" -> "learning. It")
+    # while keeping abbreviations like "U.S." or "A.B.C." intact.
+    normalized = re.sub(r"(?<!\b[A-Z])([.!?])([A-Z])", r"\1 \2", str(text or ""))
+    return " ".join(normalized.strip().split())
 
 
 def trailing_word(text: str) -> str:

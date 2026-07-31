@@ -101,6 +101,10 @@ class ResponseChunker:
         return self._take_sentence_chunks(final=True)
 
     def _take_sentence_chunks(self, *, final: bool) -> list[str]:
+        # Normalize punctuation spacing (e.g., "learning.It" -> "learning. It")
+        # while keeping abbreviations like "U.S." or "A.B.C." intact.
+        self.buffer = re.sub(r"(?<!\b[A-Z])([.!?])([A-Z])", r"\1 \2", self.buffer)
+
         chunks: list[str] = []
         while not self.exhausted:
             split_at = self._sentence_split()
