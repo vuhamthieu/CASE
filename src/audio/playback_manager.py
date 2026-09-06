@@ -68,6 +68,9 @@ class AudioPlaybackManager:
             "AUDIO_PLAYBACK_RETRY_ON_UNDERFLOW",
             defaults.AUDIO_PLAYBACK_RETRY_ON_UNDERFLOW,
         )
+        import queue
+        self._audio_queue = queue.Queue()
+        self._thread = None
         self._lock = threading.RLock()
         self._stream = None
         self._device = None
@@ -90,6 +93,37 @@ class AudioPlaybackManager:
             if self.backend != "sounddevice":
                 raise ValueError(f"unsupported audio playback backend: {self.backend}")
             self._ensure_sounddevice_stream()
+
+    def _playback_loop(self) -> None:
+        silence_chunk = None
+        while not self._closed:
+            if self._stream is None or not self._stream.active:
+                time.sleep(0.01)
+                continue
+
+            try:
+                item = self._audio_queue.get(timeout=0.01)
+                if item is None:
+                    break
+                payload, done_event = item
+                try:
+                    if self._stream and self._stream.active:
+                        self._stream.write(payload.tobytes())
+                except Exception as e:
+                    logger.error(f"AUDIO_PLAYBACK: write error: {e}")
+                    self._discard_stream()
+                finally:
+                    if done_event:
+                        done_event.set()
+            except queue.Empty:
+                if self.keep_stream_open and self._stream and self._stream.active:
+                    frames = self.blocksize if self.blocksize > 0 else 2048
+                    if silence_chunk is None or silence_chunk.shape != (frames, self._channels):
+                        silence_chunk = np.zeros((frames, self._channels), dtype="<i2")
+                    try:
+                        self._stream.write(silence_chunk.tobytes())
+                    except Exception:
+                        self._discard_stream()
 
     def play(
         self,
@@ -152,20 +186,21 @@ class AudioPlaybackManager:
             else:
                 guard = max(guard, drain_time)
 
-            try:
-                if not self._stream.active:
-                    self._stream.start()
-                underflowed = bool(
-                    self._stream.write(payload.tobytes())
-                )
-                if guard > 0:
-                    time.sleep(guard)
-                if not self.keep_stream_open:
-                    self._stream.stop()
-            except Exception:
-                self._discard_stream()
-                raise
+            done_event = threading.Event()
+            
+            if not self._stream.active:
+                self._stream.start()
 
+            self._audio_queue.put((payload, done_event))
+            done_event.wait()
+
+            if guard > 0:
+                time.sleep(guard)
+
+            if not self.keep_stream_open:
+                self._stream.stop()
+
+            underflowed = False
             result = {
                 "configured_device": self._device,
                 "device_name": self._device_name,
@@ -193,23 +228,12 @@ class AudioPlaybackManager:
                 effective_safe_mode,
                 duration,
             )
-            if underflowed:
-                if not self._underflow_warned:
-                    logger.warning(
-                        "AUDIO_PLAYBACK: output underflow detected; future playback "
-                        "will use safe mode"
-                    )
-                    self._underflow_warned = True
-                if self.retry_on_underflow:
-                    self._force_safe_mode = True
-                    self._discard_stream()
-            if not self.keep_stream_open:
-                self._discard_stream()
             return result
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._audio_queue.put(None)
             self._discard_stream()
 
     def _ensure_sounddevice_stream(self, *, safe_mode: bool = False) -> None:
@@ -264,6 +288,11 @@ class AudioPlaybackManager:
                         requested_latency,
                         self.keep_stream_open,
                     )
+                    
+                    if self._thread is None or not self._thread.is_alive():
+                        self._thread = threading.Thread(target=self._playback_loop, daemon=True)
+                        self._thread.start()
+                    
                     return
                 except Exception as exc:
                     last_error = exc
