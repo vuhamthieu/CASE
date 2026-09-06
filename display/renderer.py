@@ -89,22 +89,13 @@ class DisplayRenderer:
         )
 
     def _build_layout(self, snapshot: ConversationSnapshot, cursor_visible: bool):
-        root = Layout(name="root")
-        root.split_column(
-            Layout(self._render_header(snapshot.status), name="header", size=3),
-            Layout(
-                self._render_body(snapshot.messages, snapshot.current_stream_text, cursor_visible),
-                name="body",
-                ratio=1,
-                minimum_size=10,
-            ),
-            Layout(self._render_footer(snapshot.metrics), name="footer", size=2),
+        root = Layout(
+            self._render_body(snapshot.messages, snapshot.current_stream_text, cursor_visible),
+            name="root"
         )
         return root
 
-    def _render_header(self, status: str):
-        header = Text(f"CASE {status.upper()}", style=self._style_for_line(status), justify="left")
-        return Group(Align.left(header), Rule(style=self._theme.panel_line))
+
 
     def _render_body(self, messages: tuple[ConversationMessage, ...], current_stream_text: str, cursor_visible: bool):
         rendered = Text(justify="left")
@@ -119,13 +110,7 @@ class DisplayRenderer:
             rendered.append("\n")
         return Align.left(rendered)
 
-    def _render_footer(self, metrics: SystemMetrics):
-        footer = Text.from_markup(
-            f"{self._metric_markup('CPU', metrics.cpu_percent, 80)}   "
-            f"{self._metric_markup('RAM', metrics.ram_percent, 80)}   "
-            f"{self._temp_markup(metrics.temperature)}"
-        )
-        return Group(Align.left(footer), Rule(style=self._theme.panel_line))
+
 
     def _select_turns(self, messages: tuple[ConversationMessage, ...], current_stream_text: str) -> list[tuple[str, str, bool]]:
         selected = list(messages[-self._config.history_turns :])
@@ -154,24 +139,4 @@ class DisplayRenderer:
 
     def _body_width(self) -> int:
         return max(self._config.min_terminal_width, self._console.width or self._config.min_terminal_width) - 4
-
-    def _style_for_line(self, status: str) -> str:
-        status_name = status.upper()
-        if status_name in {"SPEAKING", "ACTIVE"}:
-            return "bold white"
-        if status_name in {"THINKING"}:
-            return "bold bright_white"
-        if status_name in {"LISTENING"}:
-            return "bold white"
-        return "white"
-
-    @staticmethod
-    def _metric_markup(label: str, value: float, threshold: float) -> str:
-        color = "red" if value >= threshold else "white"
-        return f"[{color}]{label} {value:.0f}%[/{color}]"
-
-    @staticmethod
-    def _temp_markup(value: float) -> str:
-        color = "red" if value >= 75 else "white"
-        return f"[{color}]TEMP {value:.0f}C[/{color}]"
 
