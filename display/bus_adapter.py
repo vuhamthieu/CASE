@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .display_manager import DisplayManager
@@ -52,6 +53,7 @@ class DisplayBusAdapter:
     async def _on_ai_speak(self, payload: Any) -> None:
         text = self._extract_text(payload)
         if text:
+            text = re.sub(r"(?<!\b[A-Z])([.!?])([A-Z])", r"\1 \2", text)
             self.dm.append_message("CASE", text)
             self.dm.set_status("SPEAKING")
 
@@ -73,7 +75,8 @@ class DisplayBusAdapter:
             return
 
         self._stream_buffer += text
-        self.dm.update_stream(self._stream_buffer)
+        formatted = re.sub(r"(?<!\b[A-Z])([.!?])([A-Z])", r"\1 \2", self._stream_buffer)
+        self.dm.update_stream(formatted)
 
     async def _on_stream_end(self, payload: Any) -> None:
         turn_id = self._extract_turn_id(payload)
