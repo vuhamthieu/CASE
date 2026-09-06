@@ -153,13 +153,15 @@ class AudioPlaybackManager:
                 guard = max(guard, drain_time)
 
             try:
-                self._stream.start()
+                if not self._stream.active:
+                    self._stream.start()
                 underflowed = bool(
                     self._stream.write(payload.tobytes())
                 )
                 if guard > 0:
                     time.sleep(guard)
-                self._stream.stop()
+                if not self.keep_stream_open:
+                    self._stream.stop()
             except Exception:
                 self._discard_stream()
                 raise
