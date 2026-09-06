@@ -12,6 +12,6 @@ JOKE_STYLE_RULES = (
 )
 
 NORMAL_STYLE_RULES = (
-    "Keep responses concise, complete, and speakable. Use two to four short "
-    "sentences only when helpful."
+    "Provide thorough, conversational, and natural spoken responses. You can use "
+    "longer explanations when helpful, but ensure your sentences remain speakable."
 )
