@@ -96,15 +96,20 @@ class AudioPlaybackManager:
 
     def _playback_loop(self) -> None:
         silence_chunk = None
+        last_active_time = time.time()
+        
         while not self._closed:
             if self._stream is None or not self._stream.active:
                 time.sleep(0.01)
+                last_active_time = time.time()
                 continue
 
             try:
                 item = self._audio_queue.get(timeout=0.01)
                 if item is None:
                     break
+                
+                last_active_time = time.time()
                 payload, done_event = item
                 try:
                     if self._stream and self._stream.active:
@@ -117,6 +122,11 @@ class AudioPlaybackManager:
                         done_event.set()
             except queue.Empty:
                 if self.keep_stream_open and self._stream and self._stream.active:
+                    # If idle for more than 2 seconds, stop the stream to release the ALSA hardware lock
+                    if time.time() - last_active_time > 2.0:
+                        self._stream.stop()
+                        continue
+                        
                     frames = self.blocksize if self.blocksize > 0 else 2048
                     if silence_chunk is None or silence_chunk.shape != (frames, self._channels):
                         silence_chunk = np.zeros((frames, self._channels), dtype="<i2")
