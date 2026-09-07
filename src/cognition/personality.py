@@ -759,6 +759,10 @@ class CASEPersonality:
                 f'your response: "{metrics["reaction_text"]}". Do not repeat '
                 "that exact phrase. Continue with the main response in CASE's style."
             )
+            
+        # Stagger 1: Let the system catch its breath before the heavy Wi-Fi API burst
+        await asyncio.sleep(0.1)
+        
         try:
             stream = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -1180,6 +1184,11 @@ class CASEPersonality:
             queued_at,
             text,
         )
+        
+        if sequence == 0:
+            # Stagger 2: Delay slightly before waking up the TTS engine for the first chunk
+            await asyncio.sleep(0.1)
+            
         await self._publish_stream_start_once(turn_id, metrics)
         await self._publish_and_yield(
             "AI_SPEAK_STREAM_CHUNK",
