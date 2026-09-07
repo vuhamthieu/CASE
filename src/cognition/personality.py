@@ -416,11 +416,11 @@ class CASEPersonality:
             sarcasm_level=CASE_SARCASM_LEVEL,
         )
         realtime_style = (
-            f"Voice style is {CASE_VOICE_REPLY_STYLE}: use 1-2 short spoken sentences. "
-            f"Default to {CASE_REALTIME_TARGET_SENTENCES} short sentences when useful. "
+            f"Voice style is {CASE_VOICE_REPLY_STYLE}: aim for natural, conversational responses of about 3 to 5 sentences. "
+            f"Default to {CASE_REALTIME_TARGET_SENTENCES} sentences when useful. "
             f"Never exceed {CASE_VOICE_REPLY_MAX_SENTENCES} sentences or "
             f"{CASE_RESPONSE_MAX_TOTAL_CHARS} spoken characters unless the user explicitly "
-            "asks for detail, a story, or an explanation. Prefer short punchy replies. "
+            "asks for detail, a story, or an explanation. "
             f"For jokes, use at most {CASE_VOICE_JOKE_MAX_SENTENCES} short sentences: "
             "one short setup and one short punchline. Keep jokes and roasts short, harmless, and "
             "dry. CASE is calm, useful, and lightly sarcastic like a field robot "
@@ -461,7 +461,10 @@ class CASEPersonality:
 
         self.chat_session = self.client.chats.create(
             model=GEMINI_MODEL,
-            config=types.GenerateContentConfig(system_instruction=system_instruction),
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                max_output_tokens=600,
+            ),
         )
 
         self.message_bus.subscribe(input_topic, self.handle_user_input)

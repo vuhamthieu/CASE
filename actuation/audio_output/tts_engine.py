@@ -532,11 +532,71 @@ class CASEVoice:
         active_turn: Optional[int] = None
         active_metrics: Optional[dict] = None
         active_text_parts: list[str] = []
+        
+        # 1-CHUNK PRE-FETCH BUFFER
+        pending_audio_item = None
+
+        async def flush_pending_audio():
+            nonlocal pending_audio_item
+            if pending_audio_item is None:
+                return
+            item = pending_audio_item
+            pending_audio_item = None
+            
+            metrics = item["metrics"]
+            item["playback_start_at"] = time.monotonic()
+            if "first_audio_play_start_at" not in metrics:
+                metrics["first_audio_play_start_at"] = item["playback_start_at"]
+            metrics["chunks_played"] = int(metrics.get("chunks_played", 0)) + 1
+
+            logger.info(
+                "TTS_PLAYBACK_ORDER: turn=%s seq=%s",
+                item.get("turn_id"),
+                item.get("sequence"),
+            )
+            active_text_parts.append(item["text"])
+            logger.debug(
+                "TTS_PLAYBACK_TEXT: turn=%s seq=%s text=%s",
+                item.get("turn_id"),
+                item.get("sequence"),
+                item["text"],
+            )
+            loop = asyncio.get_running_loop()
+            self._answer_audio_active = True
+            try:
+                if item["kind"] == "audio":
+                    await loop.run_in_executor(
+                        self._playback_executor,
+                        self._play_raw_audio,
+                        item["audio"],
+                        item["sample_rate"],
+                    )
+                else:
+                    logger.warning(
+                        "Playing TTS chunk through direct fallback: turn=%s seq=%s",
+                        item["turn_id"],
+                        item["sequence"],
+                    )
+                    await loop.run_in_executor(
+                        self._playback_executor,
+                        self._run_direct_pipeline,
+                        item["text"],
+                    )
+            finally:
+                self._answer_audio_active = False
+
+            item["playback_done_at"] = time.monotonic()
+            self._log_chunk_latency(item)
 
         while True:
             item = await self.audio_playback_queue.get()
             try:
                 kind = item["kind"]
+                
+                # Flush the pending item before handling start/end/reaction
+                if kind in {"start", "end", "reaction"}:
+                    await flush_pending_audio()
+                    
                 if kind == "start":
                     active_turn = item["turn_id"]
                     active_metrics = item["metrics"]
@@ -591,50 +651,12 @@ class CASEVoice:
                     continue
 
                 if kind in {"audio", "direct"}:
-                    metrics = item["metrics"]
-                    item["playback_start_at"] = time.monotonic()
-                    if "first_audio_play_start_at" not in metrics:
-                        metrics["first_audio_play_start_at"] = item["playback_start_at"]
-                    metrics["chunks_played"] = int(metrics.get("chunks_played", 0)) + 1
-
-                    logger.info(
-                        "TTS_PLAYBACK_ORDER: turn=%s seq=%s",
-                        item.get("turn_id"),
-                        item.get("sequence"),
-                    )
-                    active_text_parts.append(item["text"])
-                    logger.debug(
-                        "TTS_PLAYBACK_TEXT: turn=%s seq=%s text=%s",
-                        item.get("turn_id"),
-                        item.get("sequence"),
-                        item["text"],
-                    )
-                    loop = asyncio.get_running_loop()
-                    self._answer_audio_active = True
-                    try:
-                        if kind == "audio":
-                            await loop.run_in_executor(
-                                self._playback_executor,
-                                self._play_raw_audio,
-                                item["audio"],
-                                item["sample_rate"],
-                            )
-                        else:
-                            logger.warning(
-                                "Playing TTS chunk through direct fallback: turn=%s seq=%s",
-                                item["turn_id"],
-                                item["sequence"],
-                            )
-                            await loop.run_in_executor(
-                                self._playback_executor,
-                                self._run_direct_pipeline,
-                                item["text"],
-                            )
-                    finally:
-                        self._answer_audio_active = False
-
-                    item["playback_done_at"] = time.monotonic()
-                    self._log_chunk_latency(item)
+                    # If we already have a chunk pending, play it now that the NEXT chunk has arrived!
+                    if pending_audio_item is not None:
+                        await flush_pending_audio()
+                        
+                    # Queue the newly arrived chunk to wait for the next one
+                    pending_audio_item = item
                     continue
 
                 if kind == "end":
