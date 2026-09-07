@@ -533,7 +533,6 @@ class CASEVoice:
         active_metrics: Optional[dict] = None
         active_text_parts: list[str] = []
         
-        # 1-CHUNK PRE-FETCH BUFFER
         pending_audio_item = None
 
         async def flush_pending_audio():
