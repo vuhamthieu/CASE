@@ -764,7 +764,6 @@ class CASEPersonality:
             )
             
         # Stagger 1: Let the system catch its breath before the heavy Wi-Fi API burst
-        await asyncio.sleep(0.1)
         
         try:
             stream = await asyncio.wait_for(
@@ -1190,7 +1189,7 @@ class CASEPersonality:
         
         if sequence == 0:
             # Stagger 2: Delay slightly before waking up the TTS engine for the first chunk
-            await asyncio.sleep(0.1)
+            pass
             
         await self._publish_stream_start_once(turn_id, metrics)
         await self._publish_and_yield(

@@ -205,68 +205,6 @@ class AudioPlaybackManager:
                 self._discard_stream()
             return result
 
-    def play_continuous(
-        self,
-        audio: bytes | np.ndarray,
-        sample_rate: int,
-        *,
-        safe_mode: bool = False,
-    ) -> bool:
-        """Play audio continuously without stopping the stream. Returns True on underflow."""
-        with self._lock:
-            if self._closed:
-                self._closed = False
-            if self.backend == "aplay":
-                self._play_aplay(audio, sample_rate)
-                return False
-            if self.backend != "sounddevice":
-                raise ValueError(f"unsupported audio playback backend: {self.backend}")
-
-            source = self._source_array(audio)
-            source_2d = ensure_2d_audio(source)
-            duration_in = len(source_2d) / float(sample_rate)
-            is_short_sound = duration_in <= self.short_sound_threshold_sec
-            effective_safe_mode = (
-                safe_mode
-                or self._force_safe_mode
-                or (self.short_sound_safe_mode and is_short_sound)
-            )
-
-            self._ensure_sounddevice_stream(safe_mode=effective_safe_mode)
-            payload = normalize_for_playback(
-                source_2d,
-                sample_rate,
-                self._sample_rate,
-                self._channels,
-            )
-            payload = np.ascontiguousarray(payload, dtype="<i2")
-
-            try:
-                if not getattr(self._stream, "active", False):
-                    self._stream.start()
-                underflowed = bool(self._stream.write(payload.tobytes()))
-                return underflowed
-            except Exception:
-                self._discard_stream()
-                raise
-
-    def flush_continuous(self, tail_guard_sec: float | None = None) -> None:
-        """Drain hardware buffer and stop the continuous stream."""
-        with self._lock:
-            if self.backend == "sounddevice" and self._stream and getattr(self._stream, "active", False):
-                guard = self.tail_guard_sec if tail_guard_sec is None else tail_guard_sec
-                stream_latency = getattr(self._stream, "latency", 0.15)
-                if not isinstance(stream_latency, (int, float)) or stream_latency <= 0:
-                    stream_latency = 0.15
-                drain_time = stream_latency + 0.03
-                guard = max(guard, drain_time)
-                
-                try:
-                    if guard > 0:
-                        time.sleep(guard)
-                    self._stream.stop()
-                except Exception:
-                    self._discard_stream()
 
     def close(self) -> None:
         with self._lock:

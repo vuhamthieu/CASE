@@ -49,34 +49,17 @@ class PiperOnnxSynthesizer:
         try:
             from piper.voice import PiperVoice
             import onnxruntime as ort
-            
-            original_init = ort.SessionOptions.__init__
-            def patched_init(self, *args, **kwargs):
-                original_init(self, *args, **kwargs)
-                self.intra_op_num_threads = 2
-                self.inter_op_num_threads = 1
-            
-            # Apply monkey patch just for Piper loading
-            ort.SessionOptions.__init__ = patched_init
-            
         except ImportError as exc:
             raise RuntimeError(
                 "piper-tts Python package is required for persistent Piper ONNX "
                 "inference; install requirements.txt"
             ) from exc
 
-        try:
-            self.voice = PiperVoice.load(
-                str(self.model_path),
-                config_path=str(self.config_path),
-                use_cuda=False,
-            )
-        finally:
-            # Restore the original method immediately after loading
-            try:
-                ort.SessionOptions.__init__ = original_init
-            except NameError:
-                pass
+        self.voice = PiperVoice.load(
+            str(self.model_path),
+            config_path=str(self.config_path),
+            use_cuda=False,
+        )
         voice_rate = getattr(getattr(self.voice, "config", None), "sample_rate", None)
         if voice_rate:
             self.sample_rate = int(voice_rate)
